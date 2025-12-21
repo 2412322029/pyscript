@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Database
+*.sqlite3
+*.sqlite
+*.db
+*.db-journal
+*.db-shm
+
+# Server logs
+*.log
+logs/
+
+# Build
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Documentation
+docs/_build/
+build/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Virtual environment
+.env/
+venv/
+ENV/
+
+# Package manager
+*.pyc
+*.pyo
+__pycache__/
+
+# Redis
+redis-server.pid
+redis-sentinel.pid
