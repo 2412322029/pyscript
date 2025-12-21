@@ -1,12 +1,14 @@
 from fastapi import APIRouter
 
-from api.routes import scripts, tasks, projects
+from api.routes import scripts, tasks, projects, flow
 
-router = APIRouter()
+api_router = APIRouter()
 
-# Include all API routes
-router.include_router(scripts.router, tags=["scripts"])
-router.include_router(tasks.router, tags=["tasks"])
-router.include_router(projects.router, tags=["projects"])
+api_router.include_router(scripts.router, tags=["scripts"])
+api_router.include_router(tasks.router, tags=["tasks"])
+api_router.include_router(projects.router, tags=["projects"])
+api_router.include_router(flow.router, tags=["flows"])
 
-__all__ = ["router"]
+__all__ = ["api_router"]
+
+

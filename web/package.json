@@ -6,13 +6,23 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "gen": "openapi-generator-cli generate -g typescript -i http://localhost:8000/openapi.json -o ./src/api",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@baklavajs/plugin-renderer-vue": "^1.10.2",
+    "@vicons/ionicons5": "^0.13.0",
+    "axios": "^1.13.2",
+    "baklavajs": "^2.8.1",
+    "naive-ui": "^2.43.2",
     "vue": "^3.5.24"
   },
   "devDependencies": {
+    "@openapitools/openapi-generator-cli": "^2.25.2",
+    "@types/node": "^20.14.2",
     "@vitejs/plugin-vue": "^6.0.1",
-    "vite": "^7.2.4"
+    "typescript": "^5.4.5",
+    "vite": "^7.2.4",
+    "vue-tsc": "^2.0.22"
   }
 }

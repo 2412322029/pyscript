@@ -46,7 +46,7 @@ from models.models import Base
 from services.script_execution_service import ScriptExecutionService
 from tasks import cleanup_old_tasks
 from middleware.exception_handlers import register_exception_handlers
-from api.api import router as api_router
+from api.routes import api_router  # 修改导入路径
 from middleware.logging_config import configure_logging
 
 # Configure logging
@@ -79,7 +79,7 @@ Base.metadata.create_all(bind=engine)
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=["http://localhost:5173"],  # 更新为Vue前端端口
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -111,4 +111,5 @@ async def periodic_cleanup():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
+
