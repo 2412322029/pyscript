@@ -1,39 +1,50 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional, List
 from datetime import datetime
-from typing import Optional
 
 
 class ProjectBase(BaseModel):
-    """项目基础模型"""
-    name: str
-    description: Optional[str] = None
-    created_at: Optional[datetime] = None
+    name: str = Field(..., min_length=1, max_length=100, description="Project name")
+    description: Optional[str] = Field(
+        None, max_length=500, description="Project description"
+    )
+    is_active: Optional[bool] = Field(True, description="Whether the project is active")
 
 
 class ProjectCreate(ProjectBase):
-    """创建项目模型"""
+    """Schema for creating a new project"""
+
     pass
 
 
 class ProjectUpdate(BaseModel):
-    """更新项目模型"""
-    name: Optional[str] = None
-    description: Optional[str] = None
+    """Schema for updating an existing project"""
+
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    is_active: Optional[bool] = None
 
 
-class ProjectInDB(ProjectBase):
-    """数据库中的项目模型"""
-    id: int
+class ProjectInDBBase(ProjectBase):
+    id: int = Field(..., description="Project ID")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
 
     class Config:
         from_attributes = True
 
 
-class Project(ProjectInDB):
-    """项目响应模型"""
-    pass
+class Project(ProjectInDBBase):
+    """Schema for returning project details"""
+
+    script_count: int = Field(0, description="Number of scripts in this project")
 
 
-class ProjectResponse(Project):
-    """项目API响应模型"""
-    pass
+class ProjectList(BaseModel):
+    """Schema for listing projects with pagination"""
+
+    projects: List[Project]
+    pagination: dict = Field(
+        default_factory=lambda: {"total": 0, "skip": 0, "limit": 10, "has_next": False},
+        description="Pagination information",
+    )

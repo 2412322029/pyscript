@@ -38,12 +38,6 @@ backend/
   ├── services/        # 业务逻辑服务
   │   ├── project_service.py        # 项目管理服务
   │   └── script_execution_service.py  # 脚本执行服务
-  ├── static/          # 静态文件 (前端应用)
-  │   ├── src/         # Vue 源代码
-  │   ├── vite.config.js  # Vite 配置
-  │   └── package.json   # 前端依赖
-  └── database.py      # 数据库连接配置
-requirements.txt       # 项目依赖
 scripts/               # 工具脚本
 ```
 
