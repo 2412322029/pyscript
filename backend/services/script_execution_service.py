@@ -1,12 +1,11 @@
-import json
-import subprocess
-import re
-import logging
-from datetime import datetime
-import time
-import os
 import asyncio
-from typing import Dict, Any, List, Union, Optional
+import json
+import logging
+import re
+import subprocess
+from datetime import datetime
+from traceback import format_exc
+from typing import Any, Dict, List, Optional, Union
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -18,6 +17,18 @@ class ScriptExecutionService:
 
     异步实现，适配FastAPI框架，支持各种脚本操作
     """
+
+    global_context: Dict[str, Any] = {}
+
+    def __init__(self):
+        self.context: Dict[str, Any] = {
+            "status": "created",
+            "results_msg": {},
+            "print_msg": "",
+            "execution_history": [],
+            "start_time": datetime.now().isoformat(),
+            "execution_time": None,
+        }
 
     # 支持的操作类型
     SUPPORTED_ACTIONS: set[str] = {
@@ -36,199 +47,180 @@ class ScriptExecutionService:
     # 触发器类型
     TRIGGER_TYPES: set[str] = {"time_based", "interval", "event_based"}
 
-    @staticmethod
     async def execute_script(
+        self,
         script_content: Union[str, Dict[str, Any]],
+        script_content_type: str = "json",
         variables: Optional[Dict[str, Any]] = None,
+        log_history: bool = False,
     ) -> Dict[str, Any]:
         """
         执行脚本内容（异步版本）
 
         Args:
             script_content: 脚本内容(JSON字符串或字典)
+            script_content_type: 脚本内容类型，默认"json"，也可以是"python"
             variables: 初始变量字典
+            log_history: 是否记录执行历史，默认True
 
         Returns:
             执行结果字典
         """
         try:
             # 解析脚本内容
-            if isinstance(script_content, str):
-                try:
-                    script_data: Dict[str, Any] = json.loads(script_content)
-                except json.JSONDecodeError:
-                    # 如果不是有效的JSON，尝试作为Python代码执行（简单兼容）
-                    return await ScriptExecutionService._execute_python_script(
-                        script_content, variables
-                    )
+            if script_content_type == "json":
+                if isinstance(script_content, str):
+                    try:
+                        script_data: Dict[str, Any] = json.loads(script_content)
+                    except json.JSONDecodeError:
+                        # 如果不是有效的JSON，尝试作为Python代码执行（简单兼容）
+                        return await self._execute_python_script(script_content, variables)
+                else:
+                    script_data = script_content
+            elif script_content_type == "python":
+                return await self._execute_python_script(script_content, variables)
             else:
-                script_data = script_content
+                return self._create_error(f"Unsupported script content type: {script_content_type}")
 
             # 初始化变量空间
-            context: Dict[str, Any] = {
-                "variables": variables.copy() if variables else {},
-                "results": {},
-                "execution_history": [],
-                "start_time": datetime.now().isoformat(),
-            }
+            self.context["variables"] = variables.copy() if variables else {}
 
             # 执行脚本步骤
             if "steps" in script_data:
                 for step in script_data["steps"]:
-                    step_result = await ScriptExecutionService._execute_step(
-                        step, context
+                    step_result = await self._execute_step(
+                        step, self.context, log_history
                     )
                     if step_result.get("type") == "error":
                         # 如果步骤执行出错，中断执行
-                        context["results"]["error"] = step_result["message"]
+                        self.context["status"] = "error"
+                        self.context["results_msg"] = step_result["message"]
                         break
+                    self.context["results_msg"].update(step_result.get("results", {}))
             else:
                 # 单步骤执行模式
-                step_result = await ScriptExecutionService._execute_step(
-                    script_data, context
+                step_result = await self._execute_step(
+                    script_data, self.context, log_history
                 )
                 if step_result.get("type") == "error":
-                    context["results"]["error"] = step_result["message"]
+                    self.context["status"] = "error"
+                    self.context["results_msg"] = step_result["message"]
 
             # 完成执行
-            context["end_time"] = datetime.now().isoformat()
-
-            return {
-                "status": "success" if "error" not in context["results"] else "error",
-                "variables": context["variables"],
-                "results": context["results"],
-                "execution_history": context["execution_history"],
-                "execution_time": context["end_time"],
-            }
+            self.context["end_time"] = datetime.now().isoformat()
+            return self.context
 
         except Exception as e:
             logger.error(f"Script execution failed: {str(e)}")
-            return {"status": "error", "error": str(e)}
+            return {"status": "error", "results_msg": str(e)}
 
-    @staticmethod
     async def _execute_step(
-        step: Dict[str, Any], context: Dict[str, Any]
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
     ) -> Dict[str, Any]:
         """执行单个脚本步骤（异步版本）"""
         action_type: Optional[str] = step.get("action")
 
         if not action_type:
-            return ScriptExecutionService._create_error("Action type is required")
+            return self._create_error("Action type is required")
 
-        if action_type not in ScriptExecutionService.SUPPORTED_ACTIONS:
-            return ScriptExecutionService._create_error(
-                f"Unsupported action type: {action_type}"
-            )
+        if action_type not in self.SUPPORTED_ACTIONS:
+            return self._create_error(f"Unsupported action type: {action_type}")
 
         timestamp: str = datetime.now().isoformat()
 
         try:
             # 根据动作类型执行相应操作
             if action_type == "set_var":
-                result = ScriptExecutionService._set_variable(
-                    step, context["variables"]
-                )
+                result = self._set_variable(step, context["variables"])
             elif action_type == "get_var":
-                result = ScriptExecutionService._get_variable(
-                    step, context["variables"]
-                )
+                result = self._get_variable(step, context["variables"])
             elif action_type == "execute_command":
-                result = await ScriptExecutionService._execute_command(step)
+                result = await self._execute_command(step)
             elif action_type == "condition":
-                result = await ScriptExecutionService._execute_condition(step, context)
+                result = await self._execute_condition(step, context, log_history)
             elif action_type == "loop":
-                result = await ScriptExecutionService._execute_loop(step, context)
+                result = await self._execute_loop(step, context, log_history)
             elif action_type == "delay":
-                result = await ScriptExecutionService._execute_delay(step)
+                result = await self._execute_delay(step, context, log_history)
             elif action_type == "log":
-                result = ScriptExecutionService._execute_log(step)
+                result = self._execute_log(step)
             elif action_type == "trigger":
-                result = ScriptExecutionService._execute_trigger(step, context)
+                result = self._execute_trigger(step, context, log_history)
             elif action_type == "http_request":
-                result = await ScriptExecutionService._execute_http_request(step)
+                result = await self._execute_http_request(step, context["variables"])
             elif action_type == "combine_data":
-                result = ScriptExecutionService._combine_data(
-                    step, context["variables"]
-                )
+                result = self._combine_data(step, context["variables"])
             else:
-                result = ScriptExecutionService._create_error(
-                    f"Unknown action type: {action_type}"
-                )
+                result = self._create_error(f"Unknown action type: {action_type}")
 
             # 记录执行历史
-            context["execution_history"].append(
-                {"timestamp": timestamp, "action": action_type, "result": result}
-            )
+            if log_history:
+                context["execution_history"].append(
+                    {"timestamp": timestamp, "action": action_type, "result": result}
+                )
 
             return result
 
         except Exception as e:
             error_message = f"Error executing {action_type}: {str(e)}"
-            logger.error(error_message)
-            return ScriptExecutionService._create_error(error_message)
+            return self._create_error(error_message,tb=format_exc())
 
-    @staticmethod
     def _set_variable(
-        step: Dict[str, Any], variables: Dict[str, Any]
+        self, step: Dict[str, Any], variables: Dict[str, Any]
     ) -> Dict[str, Any]:
         """设置变量"""
         var_name: Optional[str] = step.get("name")
         var_value: Any = step.get("value")
 
         if not var_name:
-            return ScriptExecutionService._create_error("Variable name is required")
+            return self._create_error("_set_variable: Variable name is required")
 
         # 处理变量引用
-        processed_value: Any = ScriptExecutionService._process_variable_references(
-            var_value, variables
-        )
+        processed_value: Any = self._process_variable_references(var_value, variables)
 
         variables[var_name] = processed_value
 
         return {
             "type": "success",
-            "message": f"Variable {var_name} set",
+            "message": f"Variable '{var_name}' set",
             "value": processed_value,
         }
 
-    @staticmethod
     def _get_variable(
-        step: Dict[str, Any], variables: Dict[str, Any]
+        self, step: Dict[str, Any], variables: Dict[str, Any]
     ) -> Dict[str, Any]:
         """获取变量"""
         var_name: Optional[str] = step.get("name")
         target: Optional[str] = step.get("target")
 
         if not var_name:
-            return ScriptExecutionService._create_error("Variable name is required")
+            return self._create_error("_get_variable: Variable name is required")
 
         if var_name not in variables:
-            return ScriptExecutionService._create_error(
-                f"Variable {var_name} not found"
-            )
+            return self._create_error(f"_get_variable: Variable '{var_name}' not found")
 
         value: Any = variables[var_name]
-
-        # 如果指定了目标，将值保存到results中
+        self.context.print_msg += f"Variable '{var_name}' = {value}\n"
         if target:
             return {"type": "success", "target": target, "value": value}
 
         return {"type": "success", "value": value}
 
-    @staticmethod
-    async def _execute_command(step: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_command(
+        self, step: Dict[str, Any], log_history: bool = True
+    ) -> Dict[str, Any]:
         """执行命令（异步版本）"""
         command: Optional[Union[str, List[str]]] = step.get("command")
         shell: bool = step.get("shell", False)
         timeout: int = step.get("timeout", 60)
 
         if not command:
-            return ScriptExecutionService._create_error("Command is required")
+            return self._create_error("_execute_command: Command is required")
 
         try:
             # 安全检查 - 不允许执行危险命令
-            if ScriptExecutionService._is_dangerous_command(command):
-                return ScriptExecutionService._create_error(
+            if self._is_dangerous_command(command):
+                return self._create_error(
                     "Command execution not allowed for security reasons"
                 )
 
@@ -250,15 +242,12 @@ class ScriptExecutionService:
             }
 
         except subprocess.TimeoutExpired:
-            return ScriptExecutionService._create_error("Command execution timed out")
+            return self._create_error("Command execution timed out")
         except Exception as e:
-            return ScriptExecutionService._create_error(
-                f"Command execution failed: {str(e)}"
-            )
+            return self._create_error(f"Command execution failed: {str(e)}")
 
-    @staticmethod
     async def _execute_condition(
-        step: Dict[str, Any], context: Dict[str, Any]
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
     ) -> Dict[str, Any]:
         """执行条件判断（异步版本）"""
         condition: Optional[str] = step.get("condition")
@@ -266,28 +255,22 @@ class ScriptExecutionService:
         if_false: List[Dict[str, Any]] = step.get("if_false", [])
 
         if not condition:
-            return ScriptExecutionService._create_error("Condition is required")
+            return self._create_error("_execute_condition:  Condition is required")
 
         try:
             # 处理变量引用
-            processed_condition: str = (
-                ScriptExecutionService._process_variable_references(
-                    condition, context["variables"]
-                )
+            processed_condition: str = self._process_variable_references(
+                condition, context["variables"]
             )
 
             # 安全评估条件表达式
-            result: bool = ScriptExecutionService._safe_eval(
-                processed_condition, context["variables"]
-            )
+            result: bool = self._safe_eval(processed_condition, context["variables"])
 
             # 根据条件结果执行相应步骤
             steps_to_execute: List[Dict[str, Any]] = if_true if result else if_false
 
             for sub_step in steps_to_execute:
-                sub_result = await ScriptExecutionService._execute_step(
-                    sub_step, context
-                )
+                sub_result = await self._execute_step(sub_step, context, log_history)
                 if sub_result.get("type") == "error":
                     return sub_result
 
@@ -302,9 +285,8 @@ class ScriptExecutionService:
                 f"Condition evaluation failed: {str(e)}"
             )
 
-    @staticmethod
     async def _execute_loop(
-        step: Dict[str, Any], context: Dict[str, Any]
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
     ) -> Dict[str, Any]:
         """执行循环（异步版本）"""
         loop_type: str = step.get("type", "for")  # for 或 while
@@ -320,14 +302,12 @@ class ScriptExecutionService:
                 # 执行指定次数的循环
                 for i in range(iterations):
                     if iteration_count >= max_iterations:
-                        return ScriptExecutionService._create_error(
-                            "Loop exceeded maximum iterations"
-                        )
+                        return self._create_error("Loop exceeded maximum iterations")
 
                     context["variables"]["loop_index"] = i
                     for sub_step in loop_steps:
-                        sub_result = await ScriptExecutionService._execute_step(
-                            sub_step, context
+                        sub_result = await self._execute_step(
+                            sub_step, context, log_history
                         )
                         if sub_result.get("type") == "error":
                             return sub_result
@@ -335,30 +315,22 @@ class ScriptExecutionService:
 
             elif loop_type == "while":
                 if not condition:
-                    return ScriptExecutionService._create_error(
-                        "While loop requires a condition"
-                    )
+                    return self._create_error("While loop requires a condition")
 
                 # 执行条件循环
                 while True:
                     if iteration_count >= max_iterations:
-                        return ScriptExecutionService._create_error(
-                            "Loop exceeded maximum iterations"
-                        )
+                        return self._create_error("Loop exceeded maximum iterations")
 
-                    processed_condition: str = (
-                        ScriptExecutionService._process_variable_references(
-                            condition, context["variables"]
-                        )
+                    processed_condition: str = self._process_variable_references(
+                        condition, context["variables"]
                     )
-                    if not ScriptExecutionService._safe_eval(
-                        processed_condition, context["variables"]
-                    ):
+                    if not self._safe_eval(processed_condition, context["variables"]):
                         break
 
                     for sub_step in loop_steps:
-                        sub_result = await ScriptExecutionService._execute_step(
-                            sub_step, context
+                        sub_result = await self._execute_step(
+                            sub_step, context, log_history
                         )
                         if sub_result.get("type") == "error":
                             return sub_result
@@ -371,8 +343,7 @@ class ScriptExecutionService:
                 f"Loop execution failed: {str(e)}"
             )
 
-    @staticmethod
-    async def _execute_delay(step: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_delay(self, step: Dict[str, Any]) -> Dict[str, Any]:
         """执行延迟（异步版本）"""
         delay_seconds: Union[int, float] = step.get("seconds", 1)
 
@@ -384,19 +355,16 @@ class ScriptExecutionService:
                 "message": f"Delayed for {delay_seconds} seconds",
             }
         except ValueError:
-            return ScriptExecutionService._create_error("Invalid delay seconds value")
+            return self._create_error("Invalid delay seconds value")
 
-    @staticmethod
-    def _execute_log(step: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_log(self, step: Dict[str, Any]) -> Dict[str, Any]:
         """执行日志记录"""
         message: str = step.get("message", "")
         level: str = step.get("level", "info")
 
         # 处理变量引用
         variables: Dict[str, Any] = step.get("variables", {})
-        processed_message: str = ScriptExecutionService._process_variable_references(
-            message, variables
-        )
+        processed_message: str = self._process_variable_references(message, variables)
 
         # 记录日志
         log_method = getattr(logger, level.lower(), logger.info)
@@ -404,28 +372,23 @@ class ScriptExecutionService:
 
         return {"type": "success", "message": processed_message, "level": level}
 
-    @staticmethod
     def _execute_trigger(
-        step: Dict[str, Any], context: Dict[str, Any]
+        self, step: Dict[str, Any], context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """执行触发器"""
         trigger_type: Optional[str] = step.get("trigger_type")
 
         if not trigger_type:
-            return ScriptExecutionService._create_error("Trigger type is required")
+            return self._create_error("Trigger type is required")
 
-        if trigger_type not in ScriptExecutionService.TRIGGER_TYPES:
-            return ScriptExecutionService._create_error(
-                f"Unsupported trigger type: {trigger_type}"
-            )
+        if trigger_type not in self.TRIGGER_TYPES:
+            return self._create_error(f"Unsupported trigger type: {trigger_type}")
 
         if trigger_type == "time_based":
             # 基于时间的触发器
             scheduled_time: Optional[str] = step.get("time")
             if not scheduled_time:
-                return ScriptExecutionService._create_error(
-                    "Time-based trigger requires a time"
-                )
+                return self._create_error("Time-based trigger requires a time")
 
             # 这里只是记录触发器，实际定时执行需要外部调度器
             return {
@@ -439,9 +402,7 @@ class ScriptExecutionService:
             # 基于时间间隔的触发器
             interval_seconds: Optional[int] = step.get("interval")
             if not interval_seconds:
-                return ScriptExecutionService._create_error(
-                    "Interval trigger requires an interval"
-                )
+                return self._create_error("Interval trigger requires an interval")
 
             return {
                 "type": "success",
@@ -454,9 +415,7 @@ class ScriptExecutionService:
             # 基于事件的触发器
             event_name: Optional[str] = step.get("event")
             if not event_name:
-                return ScriptExecutionService._create_error(
-                    "Event-based trigger requires an event name"
-                )
+                return self._create_error("Event-based trigger requires an event name")
 
             return {
                 "type": "success",
@@ -465,81 +424,122 @@ class ScriptExecutionService:
                 "message": f"Event trigger set for event: {event_name}",
             }
 
-        return ScriptExecutionService._create_error(
-            f"Unknown trigger type: {trigger_type}"
-        )
+        return self._create_error(f"Unknown trigger type: {trigger_type}")
 
-    @staticmethod
-    async def _execute_http_request(step: Dict[str, Any]) -> Dict[str, Any]:
-        """执行HTTP请求（异步版本）"""
-        # 尝试导入aiohttp库，如果不可用则使用模拟实现
+    async def _execute_http_request(
+        self, step: Dict[str, Any], variables: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
+        """执行HTTP请求（异步版本）- 简化版本"""
+
         try:
             import aiohttp
-
-            url: Optional[str] = step.get("url")
-            method: str = step.get("method", "GET").upper()
+            # 获取基本参数
+            url = step.get("url")
+            method = step.get("method", "GET").upper()
 
             if not url:
-                return ScriptExecutionService._create_error(
-                    "URL is required for HTTP request"
-                )
+                return self._create_error("URL is required for HTTP request")
+            # 定义需要处理变量引用的参数映射
+            param_mapping = {
+                "url": url,
+                "headers": step.get("headers", {}),
+                "params": step.get("params", {}),
+                "cookies": step.get("cookies", {}),
+                "proxy_url": step.get("proxy"),
+                "content_type": step.get("content_type"),
+                "data": step.get("data"),
+                "json_data": step.get("json"),
+            }
 
-            headers: Dict[str, str] = step.get("headers", {})
-            data: Any = step.get("data")
-            json_data: Any = step.get("json")
+            # 批量处理变量引用
+            result_params = {}
+            for key, value in param_mapping.items():
+                if value is not None:
+                    result_params[key] = self._process_variable_references(
+                        value, variables
+                    )
+                else:
+                    result_params[key] = None
 
-            async with aiohttp.ClientSession() as session:
-                request_kwargs: Dict[str, Any] = {"headers": headers}
-                if json_data is not None:
-                    request_kwargs["json"] = json_data
-                elif data is not None:
-                    request_kwargs["data"] = data
+            # 设置Content-Type头（如果提供）
+            if result_params["content_type"] is not None:
+                result_params["headers"]["Content-Type"] = result_params["content_type"]
 
-                async with getattr(session, method.lower())(
-                    url, **request_kwargs
+            # 其他配置参数
+            timeout_seconds = step.get("timeout")
+            allow_redirects = step.get("allow_redirects", True)
+            verify_ssl = step.get("verify_ssl", True)
+            return_json = step.get("return_json", False)
+
+            # 创建请求超时配置
+            timeout = aiohttp.ClientTimeout(
+                total=timeout_seconds if timeout_seconds is not None else 10.0
+            )
+
+            # 创建代理连接器
+            connector = (
+                aiohttp.ProxyConnector.from_url(result_params["proxy_url"])
+                if result_params["proxy_url"]
+                else None
+            )
+
+            async with aiohttp.ClientSession(connector=connector) as session:
+                # 构建请求参数字典
+                request_kwargs = {
+                    "headers": result_params["headers"],
+                    "params": result_params["params"],
+                    "timeout": timeout,
+                    "cookies": result_params["cookies"],
+                    "allow_redirects": allow_redirects,
+                    "verify_ssl": verify_ssl,
+                }
+
+                # 根据数据类型设置相应的请求体
+                if result_params["json_data"] is not None:
+                    request_kwargs["json"] = result_params["json_data"]
+                elif result_params["data"] is not None:
+                    request_kwargs["data"] = result_params["data"]
+
+                # 执行请求并处理响应
+                async with session.request(
+                    method, result_params["url"], **request_kwargs
                 ) as response:
-                    try:
-                        response_data = await response.json()
-                    except ValueError:
-                        response_data = await response.text()
+                    response_content_type = response.headers.get("Content-Type", "")
 
+                    # 处理响应数据
+                    if return_json or "application/json" in response_content_type:
+                        try:
+                            response_data = await response.json()
+                        except Exception as e:
+                            return ScriptExecutionService._create_error(
+                                f"Failed to parse JSON response: {str(e)}"
+                            )
+                    else:
+                        response_data = await response.text()
+                    variables["response"] = response_data
+                    variables["status"] = response.status
+                    variables["response_headers"] = dict(response.headers)
                     return {
                         "type": "success",
                         "method": method,
-                        "url": url,
+                        "url": result_params["url"],
                         "status": response.status,
-                        "data": response_data,
                     }
+
         except ImportError:
-            # 如果aiohttp不可用，返回模拟结果
-            url: Optional[str] = step.get("url")
-            method: str = step.get("method", "GET").upper()
+            return self._create_error("aiohttp library is required for HTTP requests.")
+        except Exception as e:
+            return self._create_error(f"Error executing HTTP request: {str(e)}", tb=format_exc())
 
-            if not url:
-                return ScriptExecutionService._create_error(
-                    "URL is required for HTTP request"
-                )
-
-            return {
-                "type": "success",
-                "method": method,
-                "url": url,
-                "message": "HTTP request would be executed here",
-                "_note": "This is a mock response. Install aiohttp for real HTTP requests.",
-            }
-
-    @staticmethod
     def _combine_data(
-        step: Dict[str, Any], variables: Dict[str, Any]
+        self, step: Dict[str, Any], variables: Dict[str, Any]
     ) -> Dict[str, Any]:
         """合并数据"""
         sources: List[Union[str, Dict[str, Any]]] = step.get("sources", [])
         target: Optional[str] = step.get("target")
 
         if not target:
-            return ScriptExecutionService._create_error(
-                "Target is required for data combining"
-            )
+            return self._create_error("Target is required for data combining")
 
         combined_data: Dict[str, Any] = {}
 
@@ -562,8 +562,9 @@ class ScriptExecutionService:
             "data_count": len(combined_data),
         }
 
-    @staticmethod
-    def _process_variable_references(value: Any, variables: Dict[str, Any]) -> Any:
+    def _process_variable_references(
+        self, value: Any, variables: Dict[str, Any]
+    ) -> Any:
         """处理字符串中的变量引用，如 ${var_name} 格式"""
         if isinstance(value, str):
             # 使用正则表达式查找所有变量引用
@@ -577,38 +578,41 @@ class ScriptExecutionService:
                     processed_value = processed_value.replace(
                         f"${{{var_name}}}", str(variables[var_name])
                     )
+                else:
+                    # 如果变量不存在，保留原始字符串
+                    processed_value = processed_value.replace(
+                        f"${{{var_name}}}", f"${{{var_name}}}"
+                    )
 
             return processed_value
         elif isinstance(value, dict):
             # 递归处理字典中的值
             return {
-                k: ScriptExecutionService._process_variable_references(v, variables)
+                k: self._process_variable_references(v, variables)
                 for k, v in value.items()
             }
         elif isinstance(value, list):
             # 递归处理列表中的值
             return [
-                ScriptExecutionService._process_variable_references(item, variables)
-                for item in value
+                self._process_variable_references(item, variables) for item in value
             ]
 
         return value
 
-    @staticmethod
-    def _safe_eval(expression: str, variables: Dict[str, Any]) -> bool:
+    def _safe_eval(self, expression: str, variables: Dict[str, Any]) -> bool:
         """安全地评估表达式，只允许基本的比较操作"""
         # 定义允许的操作符
-        allowed_operators: set[str] = {
-            "==",
-            "!=",
-            ">",
-            ">=",
-            "<",
-            "<=",
-            "and",
-            "or",
-            "not",
-        }
+        # allowed_operators: set[str] = {
+        #     "==",
+        #     "!=",
+        #     ">",
+        #     ">=",
+        #     "<",
+        #     "<=",
+        #     "and",
+        #     "or",
+        #     "not",
+        # }
 
         # 构建安全的评估环境
         safe_env: Dict[str, Any] = {"__builtins__": {}}
@@ -617,17 +621,16 @@ class ScriptExecutionService:
         safe_env.update(variables)
 
         # 检查表达式中是否有危险操作
-        if ScriptExecutionService._is_dangerous_expression(expression):
+        if self._is_dangerous_expression(expression):
             raise ValueError("Expression contains potentially dangerous operations")
 
         # 执行安全评估
         try:
             return bool(eval(expression, safe_env))
         except Exception as e:
-            raise ValueError(f"Invalid expression: {str(e)}")
+            raise ValueError(f"Invalid expression _safe_eval: {str(e)}")
 
-    @staticmethod
-    def _is_dangerous_command(command: Union[str, List[str]]) -> bool:
+    def _is_dangerous_command(self, command: Union[str, List[str]]) -> bool:
         """检查命令是否危险"""
         dangerous_commands: List[str] = [
             "rm -rf",
@@ -648,8 +651,7 @@ class ScriptExecutionService:
 
         return False
 
-    @staticmethod
-    def _is_dangerous_expression(expression: str) -> bool:
+    def _is_dangerous_expression(self, expression: str) -> bool:
         """检查表达式是否危险"""
         # 禁止的操作符和函数
         dangerous_patterns: List[str] = [
@@ -679,18 +681,33 @@ class ScriptExecutionService:
 
         return False
 
-    @staticmethod
     async def _execute_python_script(
-        script_content: str, variables: Optional[Dict[str, Any]] = None
+        self, script_content: str, variables: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """执行简单的Python脚本（兼容模式，异步版本）"""
         try:
             # 创建安全的执行环境
             local_vars: Dict[str, Any] = variables.copy() if variables else {}
+            
+            # 添加必要的内置函数到__builtins__字典中
+            safe_builtins = {
+                'print': print,
+                'str': str,
+                'int': int,
+                'float': float,
+                'bool': bool,
+                'list': list,
+                'dict': dict,
+                'len': len,
+                'range': range,
+                'abs': abs,
+                'min': min,
+                'max': max,
+            }
 
             # 异步执行脚本
             await asyncio.to_thread(
-                exec, script_content, {"__builtins__": {}}, local_vars
+                exec, script_content, {"__builtins__": safe_builtins}, local_vars
             )
 
             return {
@@ -698,10 +715,12 @@ class ScriptExecutionService:
                 "variables": local_vars,
                 "message": "Python script executed successfully",
             }
-        except Exception as e:
-            return {"status": "error", "error": str(e)}
+        except Exception:
+            logger.error(f"Python脚本执行错误: {format_exc()}")
+            return {"status": "error", "error": format_exc()}
 
-    @staticmethod
-    def _create_error(message: str) -> Dict[str, Any]:
+    def _create_error(self, message: str,tb:str="") -> Dict[str, Any]:
         """创建错误响应"""
-        return {"type": "error", "message": message}
+        if tb:
+            self.context["print_msg"] += f"\nTraceback:\n{tb}"
+        return {"type": "error", "message": message,"traceback":tb}
