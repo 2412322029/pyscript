@@ -8,7 +8,10 @@ from traceback import format_exc
 from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
 # 配置日志
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 # 定义泛型类型变量
 T = TypeVar("T")
@@ -109,7 +112,7 @@ class ScriptExecutionService:
         # 初始化执行上下文
         self.context["variables"].update(variables or {})
         # 获取步骤列表
-        steps = script_content.get("steps", []) 
+        steps = script_content.get("steps", [])
         # 执行步骤
         for i, step in enumerate(steps):
             logger.debug("Step details: %s", step)
@@ -121,12 +124,14 @@ class ScriptExecutionService:
                 )
                 return {
                     "result": "error",
+                    "context": self.context,
                     "message": f"Step {i + 1} failed: {result.get('message', 'Unknown error')}",
                 }
         # 执行完成
         self.context["status"] = "completed"
         return {
             "result": "success",
+            "context": self.context,
             "message": f"Script executed successfully with {len(steps)} steps",
         }
 
@@ -155,24 +160,15 @@ class ScriptExecutionService:
                     )
             # 获取注册的动作函数
             action_func = action_metadata.get("func")
-            # 根据函数签名传递正确的参数
-            sig = inspect.signature(action_func)
-            params = list(sig.parameters.keys())
-            # 准备参数
-            args = []
-            if "step" in params:
-                args.append(step)
-            if "variables" in params:
-                args.append(context["variables"])
-            if "context" in params:
-                args.append(context)
-            if "log_history" in params:
-                args.append(log_history)
-            # 执行动作函数
+            # print(f"执行动作函数: {action_type}，参数: {params}")
             if asyncio.iscoroutinefunction(action_func):
-                result = await action_func(*args)
+                result = await action_func(
+                    self, step=step, context=context, log_history=log_history
+                )
             else:
-                result = action_func(*args)
+                result = action_func(
+                    self, step=step, context=context, log_history=log_history
+                )
             # 记录执行历史
             if log_history:
                 context["execution_history"].append(
@@ -206,7 +202,7 @@ class ScriptExecutionService:
         },
     )
     def _set_variable(
-        self, step: Dict[str, Any], variables: Dict[str, Any]
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
     ) -> Dict[str, Any]:
         """设置变量"""
         var_name: Optional[str] = step.get("name")
@@ -214,8 +210,8 @@ class ScriptExecutionService:
         if not var_name:
             return self._create_error("_set_variable: Variable name is required")
         # 处理变量引用
-        processed_value: Any = self._process_variable_references(var_value, variables)
-        variables[var_name] = processed_value
+        processed_value: Any = self._process_variable_references(var_value, context)
+        context["variables"][var_name] = processed_value
         return {
             "sub_result": "success",
             "message": f"Variable '{var_name}' set to '{processed_value}'",
@@ -227,10 +223,12 @@ class ScriptExecutionService:
         required_options=["message"],
         options_schema={"message": {"type": "string", "description": "要打印的消息"}},
     )
-    def _print(self, step: Dict[str, Any], variables: Dict[str, Any]) -> Dict[str, Any]:
+    def _print(
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
+    ) -> Dict[str, Any]:
         """打印消息"""
         message: Optional[str] = step.get("message")
-        message = self._process_variable_references(message, variables)
+        message = self._process_variable_references(message, context)
         if not message:
             return self._create_error("Message is required")
         self.context["print_msg"] += f"{message}\n"
@@ -307,7 +305,7 @@ class ScriptExecutionService:
         try:
             # 处理变量引用
             processed_condition: str = self._process_variable_references(
-                condition, context["variables"]
+                condition, context
             )
             # 安全评估条件表达式
             result: bool = self._safe_eval(processed_condition, context["variables"])
@@ -322,9 +320,7 @@ class ScriptExecutionService:
                 "message": f"Condition result: {result}",
             }
         except Exception as e:
-            return ScriptExecutionService._create_error(
-                f"Condition evaluation failed: {str(e)}"
-            )
+            return self._create_error(f"Condition evaluation failed: {str(e)}")
 
     @action_register(
         name="loop",
@@ -367,7 +363,7 @@ class ScriptExecutionService:
                     if iteration_count >= max_iterations:
                         return self._create_error("Loop exceeded maximum iterations")
                     processed_condition: str = self._process_variable_references(
-                        condition, context["variables"]
+                        condition, context
                     )
                     if not self._safe_eval(processed_condition, context["variables"]):
                         break
@@ -391,7 +387,9 @@ class ScriptExecutionService:
         required_options=["seconds"],
         options_schema={"seconds": {"type": "number", "description": "延时秒数"}},
     )
-    async def _execute_delay(self, step: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_delay(
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
+    ) -> Dict[str, Any]:
         """执行延迟（异步版本）"""
         delay_seconds: Union[int, float] = step.get("seconds", 1)
         try:
@@ -404,12 +402,14 @@ class ScriptExecutionService:
         except ValueError:
             return self._create_error("Invalid delay seconds value")
 
-    def _execute_log(self, step: Dict[str, Any]) -> Dict[str, Any]:
+    def _execute_log(
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
+    ) -> Dict[str, Any]:
         """执行日志记录"""
         message: str = step.get("message", "")
         level: str = step.get("level", "info")
         # 处理变量引用
-        variables: Dict[str, Any] = step.get("variables", {})
+        variables: Dict[str, Any] = context["variables"]
         processed_message: str = self._process_variable_references(message, variables)
         # 记录日志
         log_method = getattr(logger, level.lower(), logger.info)
@@ -435,7 +435,7 @@ class ScriptExecutionService:
         },
     )
     def _execute_trigger(
-        self, step: Dict[str, Any], context: Dict[str, Any]
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
     ) -> Dict[str, Any]:
         """执行触发器"""
         trigger_type: Optional[str] = step.get("trigger_type")
@@ -535,8 +535,6 @@ class ScriptExecutionService:
     ) -> Dict[str, Any]:
         """执行HTTP请求（异步版本）"""
         try:
-            from traceback import format_exc
-
             import aiohttp
 
             # 获取基本参数
@@ -560,7 +558,7 @@ class ScriptExecutionService:
             for key, value in param_mapping.items():
                 if value is not None:
                     result_params[key] = self._process_variable_references(
-                        value, context["variables"]
+                        value, context
                     )
                 else:
                     result_params[key] = None
@@ -633,7 +631,6 @@ class ScriptExecutionService:
                     else:
                         response_data = await response.text()
                     context["variables"][return_var] = response_data
-                    context["variables"]["response"] = response_data
                     context["variables"]["status"] = response.status
                     context["variables"]["response_headers"] = dict(response.headers)
                     return {
@@ -658,7 +655,7 @@ class ScriptExecutionService:
         },
     )
     def _combine_data(
-        self, step: Dict[str, Any], variables: Dict[str, Any]
+        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool = True
     ) -> Dict[str, Any]:
         """合并数据"""
         sources: List[Union[str, Dict[str, Any]]] = step.get("sources", [])
@@ -667,23 +664,21 @@ class ScriptExecutionService:
             return self._create_error("Target is required for data combining")
         combined_data: Dict[str, Any] = {}
         for source in sources:
-            if isinstance(source, str) and source in variables:
+            if isinstance(source, str) and source in context["variables"]:
                 # 如果是变量引用，获取变量值
-                source_data: Any = variables[source]
+                source_data: Any = context["variables"][source]
                 if isinstance(source_data, dict):
                     combined_data.update(source_data)
             elif isinstance(source, dict):
                 # 如果是直接数据，直接合并
                 combined_data.update(source)
-        variables[target] = combined_data
+        context["variables"][target] = combined_data
         return {
             "sub_result": "success",
             "message": f"Combined data saved to {target}",
         }
 
-    def _process_variable_references(
-        self, value: Any, variables: Dict[str, Any]
-    ) -> Any:
+    def _process_variable_references(self, value: Any, context: Dict[str, Any]) -> Any:
         """处理字符串中的变量引用，如 ${var_name} 格式"""
         if isinstance(value, str):
             # 使用正则表达式查找所有变量引用
@@ -692,10 +687,10 @@ class ScriptExecutionService:
 
             processed_value: str = value
             for var_name in matches:
-                if var_name in variables:
+                if var_name in context["variables"]:
                     # 替换变量引用为实际值
                     processed_value = processed_value.replace(
-                        f"${{{var_name}}}", str(variables[var_name])
+                        f"${{{var_name}}}", str(context["variables"][var_name])
                     )
                 else:
                     # 如果变量不存在，保留原始字符串
@@ -707,17 +702,15 @@ class ScriptExecutionService:
         elif isinstance(value, dict):
             # 递归处理字典中的值
             return {
-                k: self._process_variable_references(v, variables)
+                k: self._process_variable_references(v, context)
                 for k, v in value.items()
             }
         elif isinstance(value, list):
             # 递归处理列表中的值
-            return [
-                self._process_variable_references(item, variables) for item in value
-            ]
+            return [self._process_variable_references(item, context) for item in value]
         return value
 
-    def _safe_eval(self, expression: str, variables: Dict[str, Any]) -> bool:
+    def _safe_eval(self, expression: str, context: Dict[str, Any]) -> bool:
         """安全地评估表达式，只允许基本的比较操作"""
         # 定义允许的操作符
         # allowed_operators: set[str] = {
@@ -734,7 +727,7 @@ class ScriptExecutionService:
         # 构建安全的评估环境
         safe_env: Dict[str, Any] = {"__builtins__": {}}
         # 添加变量到环境中
-        safe_env.update(variables)
+        safe_env.update(context["variables"])
         # 检查表达式中是否有危险操作
         if self._is_dangerous_expression(expression):
             raise ValueError("Expression contains potentially dangerous operations")
