@@ -60,22 +60,29 @@ class ScriptExecutionService:
     """
 
     global_context: Dict[str, Any] = {}
+    __slots__ = [
+        "status",
+        "print_msg",
+        "variables",
+        "execution_history",
+        "start_time",
+        "execution_time",
+        "context",
+        "result_message",
+    ]
+
     # 类级别的支持动作字典
     def __init__(self, log_level=logging.INFO):
         """初始化脚本执行服务"""
-        self.context: Dict[str, Any] = {
-            "status": "created",
-            "results_msg": {},
-            "print_msg": asyncio.Queue(),
-            "variables": {},
-            "execution_history": [],
-            "start_time": datetime.now().isoformat(),
-            "execution_time": "-1",
-        }
-        
-        # 将字典 key 同时设为类成员，方便直接访问
-        for key, value in self.context.items():
-            setattr(self, key, value)
+        self.status = "created"
+        self.print_msg = asyncio.Queue()
+        self.variables = {}
+        self.execution_history = []
+        self.start_time = datetime.now().isoformat()
+        self.execution_time = "-1"
+        self.result_message = ""
+        self.context = lambda: {k: getattr(self, k) for k in self.__slots__ if k != "context"}
+
     # 触发器类型
     TRIGGER_TYPES: set[str] = {"time_based", "interval", "event_based"}
 
@@ -92,37 +99,29 @@ class ScriptExecutionService:
         if isinstance(script_content, str):
             return await self._execute_python_script(script_content)
         # 初始化执行上下文
-        self.context["variables"].update(variables or {})
+        self.variables.update(variables or {})
         # 获取步骤列表
         steps = script_content.get("steps", [])
         # 执行步骤
         for i, step in enumerate(steps):
             logger.debug("Step details: %s", step)
-            self.context["status"] = f"executing step {i + 1}" 
-            result = await self._execute_step(step, self.context, log_history)
+            self.status = f"executing step {i + 1}"
+            result = await self._execute_step(step, log_history)
             if result["sub_result"] != "success":
-                self.context["status"] = "error"
+                self.status = "error"
                 logger.error(
                     "Step %d failed: %s", i + 1, result.get("message", "Unknown error")
                 )
-                return {
-                    "result": "error",
-                    "context": self.context,
-                    "message": f"Step {i + 1} failed: {result.get('message', 'Unknown error')}",
-                }
+                self.result_message = f"Step {i + 1} failed: {result.get('message', 'Unknown error')}"
         # 执行完成
-        self.context["execution_time"] = f"{time.perf_counter() - start_time:.6f}"
-        self.context["status"] = "completed"
-        return {
-            "result": "success",
-            "context": self.context,
-            "message": f"Script executed successfully with {len(steps)} steps",
-        }
+        self.execution_time = f"{time.perf_counter() - start_time:.6f}"
+        self.status = "completed"
+        self.result_message = f"Script executed successfully with {len(steps)} steps"
+        self.print_msg.put_nowait("f-i-n-i-s-h")
 
     async def _execute_step(
         self,
         step: Dict[str, Any],
-        context: Dict[str, Any],
         log_history: bool,
     ) -> Dict[str, Any]:
         """执行单个脚本步骤（异步版本）"""
@@ -132,7 +131,6 @@ class ScriptExecutionService:
         # 检查动作类型是否支持（现在检查字典的键）
         if action_type not in SUPPORTED_ACTIONS.keys():
             return self._create_error(f"Unsupported action type: {action_type}")
-        timestamp: str = datetime.now().isoformat()
         try:
             # 验证必需参数
             action_metadata = SUPPORTED_ACTIONS[action_type]
@@ -146,17 +144,17 @@ class ScriptExecutionService:
             action_func = action_metadata.get("func")
             # print(f"执行动作函数: {action_type}，参数: {params}")
             if asyncio.iscoroutinefunction(action_func):
-                result = await action_func(
-                    self, step=step, context=context, log_history=log_history
-                )
+                result = await action_func(self, step=step, log_history=log_history)
             else:
-                result = action_func(
-                    self, step=step, context=context, log_history=log_history
-                )
+                result = action_func(self, step=step, log_history=log_history)
             # 记录执行历史
             if log_history:
-                context["execution_history"].append(
-                    {"timestamp": timestamp, "action": action_type, "result": result}
+                self.execution_history.append(
+                    {
+                        "timestamp": datetime.now().isoformat(),
+                        "action": action_type,
+                        "result": result,
+                    }
                 )
             return result
         except Exception as e:
@@ -182,12 +180,14 @@ class ScriptExecutionService:
         options_schema={
             "name": {"type": "string", "description": "变量名称"},
             "value": {"type": "any", "description": "变量值"},
-            "eval": {"type": "boolean", "description": "是否对值进行表达式求值", "default": False},
+            "eval": {
+                "type": "boolean",
+                "description": "是否对值进行表达式求值",
+                "default": False,
+            },
         },
     )
-    def _set_variable(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
-    ) -> Dict[str, Any]:
+    def _set_variable(self, step: Dict[str, Any], log_history: bool) -> Dict[str, Any]:
         """设置变量"""
         var_name: Optional[str] = step.get("name")
         var_value: Any = step.get("value")
@@ -195,10 +195,10 @@ class ScriptExecutionService:
         if not var_name:
             return self._create_error("_set_variable: Variable name is required")
         # 处理变量引用
-        processed_value: Any = self._process_variable_references(var_value, context)
+        processed_value: Any = self._process_variable_references(var_value)
         if eval_value:
-            processed_value = self._execute_eval(processed_value, context, log_history=False)
-        context["variables"][var_name] = processed_value
+            processed_value = self._execute_eval(processed_value, log_history=False)
+        self.variables[var_name] = processed_value
         return {
             "sub_result": "success",
             "message": f"Variable '{var_name}' set to '{processed_value}'",
@@ -210,23 +210,28 @@ class ScriptExecutionService:
         required_options=["message"],
         options_schema={
             "message": {"type": "string", "description": "要打印的消息"},
-            "eval": {"type": "boolean", "description": "是否对消息进行表达式求值", "default": False},
+            "eval": {
+                "type": "boolean",
+                "description": "是否对消息进行表达式求值",
+                "default": False,
+            },
         },
     )
-    def _print(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
-    ) -> Dict[str, Any]:
+    def _print(self, step: Dict[str, Any], log_history: bool) -> Dict[str, Any]:
         """打印消息"""
         message: Optional[str] = step.get("message")
-        message = self._process_variable_references(message, context)
+        message = self._process_variable_references(message)
         eval_value: bool = step.get("eval", False)
         if not message:
             return self._create_error("Message is required")
-                
+
         if eval_value:
-            message = self._execute_eval(message, context, log_history=False)
-        self.context["print_msg"].put_nowait(f"{message}\n")
-        return {"sub_result": "success", "message": f"Printed message: {str(message)[:100]}"}
+            message = self._execute_eval(message, log_history=False)
+        self.print_msg.put_nowait(f"{message}\n")
+        return {
+            "sub_result": "success",
+            "message": f"Printed message: {str(message)[:100]}",
+        }
 
     @action_register(
         name="execute_command",
@@ -244,7 +249,7 @@ class ScriptExecutionService:
         ],
     )
     async def _execute_command(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
+        self, step: Dict[str, Any], log_history: bool
     ) -> Dict[str, Any]:
         """执行命令（异步版本）"""
         command: Optional[Union[str, List[str]]] = step.get("command")
@@ -267,11 +272,11 @@ class ScriptExecutionService:
                 text=True,
                 timeout=timeout,
             )
-            context["print_msg"].put_nowait(f"stdout: {result.stdout}\n")
-            context["print_msg"].put_nowait(f"stderr: {result.stderr}\n")
-            context["variables"]["exit_code"] = result.returncode
-            context["variables"]["stdout"] = result.stdout
-            context["variables"]["stderr"] = result.stderr
+            self.print_msg.put_nowait(f"stdout: {result.stdout}\n")
+            self.print_msg.put_nowait(f"stderr: {result.stderr}\n")
+            self.variables["exit_code"] = result.returncode
+            self.variables["stdout"] = result.stdout
+            self.variables["stderr"] = result.stderr
             return {
                 "sub_result": "success",
                 "message": f"Command executed with exit code {result.returncode}",
@@ -283,6 +288,7 @@ class ScriptExecutionService:
             return self._create_error(
                 f"Command execution failed: {str(e)}", tb=format_exc()
             )
+
     @action_register(
         name="eval",
         description="执行表达式",
@@ -291,10 +297,8 @@ class ScriptExecutionService:
             "expression": {"type": "string", "description": "要执行的表达式"}
         },
     )
-    def _execute_eval(
-        self, expression: str, context: Dict[str, Any], log_history: bool
-    ) -> Any:
-        safe_env: Dict[str, Any] = {"__builtins__": context["variables"]}
+    def _execute_eval(self, expression: str, log_history: bool) -> Any:
+        safe_env: Dict[str, Any] = {"__builtins__": self.variables}
         if self._is_dangerous_expression(expression):
             raise ValueError("Expression contains potentially dangerous operations")
         try:
@@ -302,7 +306,7 @@ class ScriptExecutionService:
         except Exception as e:
             logger.error(f"_execute_eval failed: {str(e)}", exc_info=True)
             raise ValueError(f"Invalid _execute_eval: {str(e)}", tb=format_exc())
-    
+
     @action_register(
         name="condition",
         description="条件判断",
@@ -314,7 +318,7 @@ class ScriptExecutionService:
         },
     )
     async def _execute_condition(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
+        self, step: Dict[str, Any], log_history: bool
     ) -> Dict[str, Any]:
         """执行条件判断（异步版本）"""
         condition: Optional[str] = step.get("condition")
@@ -324,15 +328,13 @@ class ScriptExecutionService:
             return self._create_error("Condition is required")
         try:
             # 处理变量引用
-            processed_condition: str = self._process_variable_references(
-                condition, context
-            )
+            processed_condition: str = self._process_variable_references(condition)
             # 安全评估条件表达式
-            result: bool = self._safe_eval(processed_condition, context)
+            result: bool = self._safe_eval(processed_condition)
             # 根据条件结果执行相应步骤
             steps_to_execute: List[Dict[str, Any]] = if_true if result else if_false
             for sub_step in steps_to_execute:
-                sub_result = await self._execute_step(sub_step, context, log_history)
+                sub_result = await self._execute_step(sub_step, log_history)
                 if sub_result.get("type") == "error":
                     return sub_result
             return {
@@ -360,7 +362,7 @@ class ScriptExecutionService:
         },
     )
     async def _execute_loop(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
+        self, step: Dict[str, Any], log_history: bool
     ) -> Dict[str, Any]:
         """执行循环（异步版本）"""
         condition: Optional[str] = step.get("condition")  # while循环的条件
@@ -373,15 +375,11 @@ class ScriptExecutionService:
             while True:
                 if iteration_count >= max_iterations:
                     return self._create_error("Loop exceeded maximum iterations")
-                processed_condition: str = self._process_variable_references(
-                    condition, context
-                )
-                if not self._safe_eval(processed_condition, context):
+                processed_condition: str = self._process_variable_references(condition)
+                if not self._safe_eval(processed_condition):
                     break
                 for sub_step in loop_steps:
-                    sub_result = await self._execute_step(
-                        sub_step, context, log_history=False
-                    )
+                    sub_result = await self._execute_step(sub_step, log_history=False)
                     if sub_result.get("type") == "error":
                         return sub_result
                 iteration_count += 1
@@ -398,18 +396,22 @@ class ScriptExecutionService:
         required_options=["seconds"],
         options_schema={
             "seconds": {"type": "number", "description": "延时秒数"},
-            "eval": {"type": "boolean", "description": "是否对秒数进行表达式求值", "default": False},
+            "eval": {
+                "type": "boolean",
+                "description": "是否对秒数进行表达式求值",
+                "default": False,
+            },
         },
     )
     async def _execute_delay(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
+        self, step: Dict[str, Any], log_history: bool
     ) -> Dict[str, Any]:
         """执行延迟（异步版本）"""
         delay_seconds: Union[int, float] = step.get("seconds", 1)
-        delay_seconds = self._process_variable_references(delay_seconds, context)
+        delay_seconds = self._process_variable_references(delay_seconds)
         eval_value: bool = step.get("eval", False)
         if eval_value:
-            delay_seconds = self._execute_eval(delay_seconds, context, log_history=False)
+            delay_seconds = self._execute_eval(delay_seconds, log_history=False)
         try:
             # 使用异步sleep代替同步sleep
             await asyncio.sleep(float(delay_seconds))
@@ -436,7 +438,7 @@ class ScriptExecutionService:
         },
     )
     def _execute_trigger(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
+        self, step: Dict[str, Any], log_history: bool
     ) -> Dict[str, Any]:
         """执行触发器"""
         trigger_type: Optional[str] = step.get("trigger_type")
@@ -528,7 +530,7 @@ class ScriptExecutionService:
         ],
     )
     async def _execute_http_request(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
+        self, step: Dict[str, Any], log_history: bool
     ) -> Dict[str, Any]:
         """执行HTTP请求（异步版本）"""
         try:
@@ -554,9 +556,7 @@ class ScriptExecutionService:
             result_params = {}
             for key, value in param_mapping.items():
                 if value is not None:
-                    result_params[key] = self._process_variable_references(
-                        value, context
-                    )
+                    result_params[key] = self._process_variable_references(value)
                 else:
                     result_params[key] = None
             # 设置Content-Type头（如果提供）
@@ -608,9 +608,9 @@ class ScriptExecutionService:
                             )
                     else:
                         response_data = await response.text()
-                    context["variables"]["response"] = response_data
-                    context["variables"]["status"] = response.status
-                    context["variables"]["response_headers"] = dict(response.headers)
+                    self.variables["response"] = response_data
+                    self.variables["status"] = response.status
+                    self.variables["response_headers"] = dict(response.headers)
                     return {
                         "sub_result": "success",
                         "message": f"HTTP request {method} {result_params['url']} status: {response.status}",
@@ -632,9 +632,7 @@ class ScriptExecutionService:
             "output_var": {"type": "string", "description": "输出变量名"},
         },
     )
-    def _combine_data(
-        self, step: Dict[str, Any], context: Dict[str, Any], log_history: bool
-    ) -> Dict[str, Any]:
+    def _combine_data(self, step: Dict[str, Any], log_history: bool) -> Dict[str, Any]:
         """合并数据"""
         sources: List[Union[str, Dict[str, Any]]] = step.get("data_sources", [])
         output_var: Optional[str] = step.get("output_var")
@@ -642,22 +640,22 @@ class ScriptExecutionService:
             return self._create_error("Output variable is required for data combining")
         combined_data: Dict[str, Any] = {}
         for source in sources:
-            if isinstance(source, str) and source in context["variables"]:
+            if isinstance(source, str) and source in self.variables:
                 # 如果是变量引用，获取变量值
-                source_data: Any = context["variables"][source]
+                source_data: Any = self.variables[source]
                 if isinstance(source_data, dict):
                     combined_data.update(source_data)
             elif isinstance(source, dict):
                 # 如果是直接数据，直接合并
                 combined_data.update(source)
-        context["variables"][output_var] = combined_data
+        self.variables[output_var] = combined_data
         return {
             "sub_result": "success",
             "message": f"Combined data saved to {output_var}",
         }
 
     def _process_variable_references(
-        self, value: Union[str, Dict[str, Any], List[Any]], context: Dict[str, Any]
+        self, value: Union[str, Dict[str, Any], List[Any]]
     ) -> Any:
         """处理字符串中的变量引用，如 ${var_name} 格式"""
         if isinstance(value, str):
@@ -667,10 +665,10 @@ class ScriptExecutionService:
 
             processed_value: str = value
             for var_name in matches:
-                if var_name in context["variables"]:
+                if var_name in self.variables:
                     # 替换变量引用为实际值
                     processed_value = processed_value.replace(
-                        f"${{{var_name}}}", str(context["variables"][var_name])
+                        f"${{{var_name}}}", str(self.variables[var_name])
                     )
                 else:
                     self._create_error(f"Variable '{var_name}' not defined")
@@ -678,19 +676,16 @@ class ScriptExecutionService:
             return processed_value
         elif isinstance(value, dict):
             # 递归处理字典中的值
-            return {
-                k: self._process_variable_references(v, context)
-                for k, v in value.items()
-            }
+            return {k: self._process_variable_references(v) for k, v in value.items()}
         elif isinstance(value, list):
             # 递归处理列表中的值
-            return [self._process_variable_references(item, context) for item in value]
+            return [self._process_variable_references(item) for item in value]
         return value
 
-    def _safe_eval(self, expression: str, context: Dict[str, Any]) -> bool:
+    def _safe_eval(self, expression: str) -> bool:
         """安全地评估表达式，只允许基本的比较操作"""
         # 构建安全的评估环境
-        safe_env: Dict[str, Any] = {"__builtins__": context["variables"]}
+        safe_env: Dict[str, Any] = {"__builtins__": self.variables}
         # 检查表达式中是否有危险操作
         if self._is_dangerous_expression(expression):
             raise ValueError("Expression contains potentially dangerous operations")
@@ -784,7 +779,7 @@ class ScriptExecutionService:
     def _create_error(self, message: str, tb: str = "") -> Dict[str, Any]:
         """创建错误响应"""
         if tb:
-            self.context["print_msg"].put_nowait(f"\n{tb}")
+            self.print_msg.put_nowait(f"\n{tb}")
         caller_name = inspect.stack()[1].function
         return {
             "sub_result": "error",
