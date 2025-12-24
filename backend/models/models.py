@@ -9,7 +9,7 @@ Base = declarative_base()
 class Project(Base):
     __tablename__ = "projects"
     
-    id = Column(Integer, primary_key=True, index=True)
+    nid = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True)
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
@@ -23,7 +23,7 @@ class Project(Base):
 class Script(Base):
     __tablename__ = "scripts"
     
-    id = Column(Integer, primary_key=True, index=True)
+    nid = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True)
     content = Column(Text)
     project_id = Column(Integer, ForeignKey("projects.id"))
@@ -38,7 +38,7 @@ class Script(Base):
 class Display(Base):
     __tablename__ = "displays"
     
-    id = Column(Integer, primary_key=True, index=True)
+    nid = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True)
     type = Column(String(50))
     data = Column(JSON)
@@ -49,7 +49,7 @@ class Display(Base):
 class Task(Base):
     __tablename__ = "tasks"
     
-    id = Column(Integer, primary_key=True, index=True)
+    nid = Column(Integer, primary_key=True, index=True)
     script_id = Column(Integer, ForeignKey("scripts.id"))
     status = Column(String(50), default="pending")
     result = Column(JSON, nullable=True)
@@ -63,7 +63,7 @@ class Task(Base):
 class Flow(Base):
     __tablename__ = "flows"
     
-    id = Column(Integer, primary_key=True, index=True)
+    nid = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True)
     description = Column(Text)
     project_id = Column(Integer, ForeignKey("projects.id"))

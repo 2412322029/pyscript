@@ -1,13 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends
 from models.database import get_db
 from schemas.script import (
     ScriptCreate,
-    ScriptUpdate,
-    Script,
     ScriptExecutionRequest,
-    ScriptExecutionResponse,
 )
+from sqlalchemy.orm import Session
 
 router = APIRouter(
     prefix="/scripts", tags=["scripts"], responses={404: {"description": "Not found"}}
@@ -15,7 +12,7 @@ router = APIRouter(
 
 
 @router.get("/")
-def read_scripts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+def get_scripts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     """Temporary placeholder route for scripts"""
     return {"message": "Scripts endpoint placeholder"}
 
