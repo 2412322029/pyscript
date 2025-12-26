@@ -68,6 +68,11 @@ async def run_all_tests():
         script_content_type="python",
     )
 
+    # 添加观察者
+    def status_changed(new_value):
+        print(f"status changed to {new_value}")
+
+    S.add_status_observer(status_changed)
     # 创建任务
     status_task = asyncio.create_task(
         S.flush_print_queue(

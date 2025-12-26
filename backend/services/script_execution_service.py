@@ -9,6 +9,7 @@ from datetime import datetime
 from traceback import format_exc
 from typing import Any, Callable, Dict, List, Optional, Union
 
+import aiohttp
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,8 @@ class ScriptContext(BaseModel):
         {}, description="Variables in the script execution context"
     )
     start_time: datetime = Field(..., description="Start time of the script execution")
-    execution_time: int = Field(
-        -1, description="Execution time of the script in seconds"
+    execution_time: str = Field(
+        "-1", description="Execution time of the script in seconds"
     )
     result_message: str = Field(
         "", max_length=5000, description="Result message of the script execution"
@@ -98,18 +99,21 @@ class ScriptExecutionService:
     """
 
     global_context: Dict[str, Any] = {}
-    __slots__ = (ScriptContext.__fields__ | {"print_msg": ""}).keys()
+    __slots__ = ("_context", "print_msg", "_status_callbacks")
 
     # 类级别的支持动作字典
     def __init__(self, log_level: str = "INFO"):
         """初始化脚本执行服务"""
-        self.status = "created"
+        self._context = ScriptContext(
+            status="created",
+            variables={},
+            start_time=datetime.now(),
+            execution_time="-1",
+            result_message="",
+            execution_history=[],
+        )
         self.print_msg = asyncio.Queue(10)
-        self.variables = {}
-        self.execution_history = []
-        self.start_time = datetime.now().isoformat()
-        self.execution_time = "-1"
-        self.result_message = ""
+        self._status_callbacks: List[Callable[[str, Any, Any], None]] = []
         # 根据日志级别设置不同颜色
         level_colors = {
             "DEBUG": "\033[36m",  # 青色
@@ -141,18 +145,76 @@ class ScriptExecutionService:
             handlers=[handler],
         )
 
+    def add_status_observer(self, callback: Callable[[str, Any, Any], None]) -> None:
+        self._status_callbacks.append(callback)
+
+    def remove_status_observer(self, callback: Callable[[str, Any, Any], None]) -> None:
+        if callback in self._status_callbacks:
+            self._status_callbacks.remove(callback)
+
+    def _notify_status_change(self, old_value: Any, new_value: Any) -> None:
+        for callback in self._status_callbacks:
+            try:
+                callback(new_value)
+            except Exception as e:
+                logger.error(f"Status observer callback error: {e}")
+
+    @property
+    def status(self) -> str:
+        return self._context.status
+
+    @status.setter
+    def status(self, value: str):
+        old_value = self._context.status
+        self._context.status = value
+        self._notify_status_change(old_value, value)
+
+    @property
+    def variables(self) -> Dict[str, Any]:
+        return self._context.variables
+
+    @variables.setter
+    def variables(self, value: Dict[str, Any]):
+        self._context.variables = value
+
+
+    @property
+    def execution_history(self) -> List[Optional["ExecuteHistoryeModel"]]:
+        return self._context.execution_history
+
+    @execution_history.setter
+    def execution_history(self, value: List[Optional["ExecuteHistoryeModel"]]):
+        self._context.execution_history = value
+
+    @property
+    def start_time(self) -> datetime:
+        return self._context.start_time
+
+    @start_time.setter
+    def start_time(self, value: datetime):
+        self._context.start_time = value
+
+    @property
+    def execution_time(self) -> str:
+        return self._context.execution_time
+
+    @execution_time.setter
+    def execution_time(self, value: str):
+        self._context.execution_time = value
+
+    @property
+    def result_message(self) -> str:
+        return self._context.result_message
+
+    @result_message.setter
+    def result_message(self, value: str):
+        self._context.result_message = value
+
     # 触发器类型
     TRIGGER_TYPES: set[str] = {"time_based", "interval", "event_based"}
 
     def get_context(self) -> ScriptContext:
-        return ScriptContext(
-            status=self.status,
-            variables=self.variables,
-            execution_history=self.execution_history,
-            start_time=self.start_time,
-            execution_time=self.execution_time,
-            result_message=self.result_message,
-        )
+        return self._context.model_copy()
 
     async def execute_script(
         self,
@@ -643,8 +705,6 @@ class ScriptExecutionService:
     ) -> Dict[str, Any]:
         """执行HTTP请求（异步版本）"""
         try:
-            import aiohttp
-
             # 获取基本参数
             url = step.get("url")
             method = step.get("method", "GET").upper()
@@ -725,8 +785,6 @@ class ScriptExecutionService:
                         sub_result="success",
                         message=f"HTTP request {method} {result_params['url']} status: {response.status}",
                     )
-        except ImportError:
-            return self._create_error("aiohttp library is required for HTTP requests.")
         except Exception as e:
             return self._create_error(
                 f"Error executing HTTP request: {str(e)}", tb=format_exc()
