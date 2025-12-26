@@ -9,42 +9,84 @@ from datetime import datetime
 from traceback import format_exc
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from pydantic import BaseModel, Field
+
 logger = logging.getLogger(__name__)
 
-SUPPORTED_ACTIONS: Dict[str, Dict[str, Any]] = {}
+
+class SubResultModel(BaseModel):
+    sub_result: str = Field(
+        ..., min_length=1, max_length=100, description="Status of the script"
+    )
+    message: str = Field(
+        "", max_length=5000, description="Result message of the script execution"
+    )
+    tb: Optional[str] = Field(
+        None, max_length=5000, description="Traceback of the script execution"
+    )
+
+
+class ExecuteHistoryeModel(BaseModel):
+    action: str = Field(..., min_length=1, max_length=100, description="Action name")
+    timestamp: str = Field(..., description="Action timestamp")
+    action_result: Optional["SubResultModel"] = Field(None, description="Action result")
+
+
+class ScriptContext(BaseModel):
+    status: str = Field(
+        ..., min_length=1, max_length=100, description="Status of the script"
+    )
+    variables: Dict[str, Any] = Field(
+        {}, description="Variables in the script execution context"
+    )
+    start_time: datetime = Field(..., description="Start time of the script execution")
+    execution_time: int = Field(
+        -1, description="Execution time of the script in seconds"
+    )
+    result_message: str = Field(
+        "", max_length=5000, description="Result message of the script execution"
+    )
+    execution_history: List[Optional[ExecuteHistoryeModel]] = Field(
+        [], description="Execution history of the script"
+    )
+
+
+class ActionRegisterModel(BaseModel):
+    """动作注册元数据模型"""
+
+    name: str = Field(..., min_length=1, max_length=100, description="动作名称")
+    description: str = Field(..., min_length=1, max_length=500, description="动作描述")
+    required_options: Optional[List[str]] = Field([], description="动作必需参数列表")
+    optional_options: Optional[List[str]] = Field([], description="动作可选参数列表")
+    options_schema: Optional[Dict[str, Any]] = Field(
+        {}, description="动作参数 JSON Schema，用于运行时校验"
+    )
+    return_var: Optional[List[Dict[str, str]]] = Field(
+        None,
+        description="动作执行后注入到上下文中的变量列表，每项格式：{'name': '变量名', 'type': '变量类型'}",
+    )
+
+
+SUPPORTED_ACTIONS: Dict[str, ActionRegisterModel] = {}
 
 
 def action_register(
-    name: str,
-    description: str,
-    required_options: List[str] = None,
-    optional_options: List[str] = None,
-    options_schema: Dict[str, Any] = None,
-    return_var: List[Dict[str, str]] | None = None,
-):
-    """SUPPORTED_ACTIONS中
-    Args:
-        name: 动作名称
-        description: 动作描述
-        required_options: 必需参数列表
-        optional_options: 可选参数列表
-        options_schema: 参数验证模式
-        return_var: 返回值变量名列表，每个元素为{"name": "变量名", "type": "变量类型"}
-    Returns:
-        装饰器函数
+    ActionModel: ActionRegisterModel,
+) -> Callable[[Callable[..., Dict[str, Any]]], Callable[..., Dict[str, Any]]]:
+    """
+    将函数注册为可执行动作，并写入全局 SUPPORTED_ACTIONS 字典。
     """
 
-    def decorator(
-        func: Callable[..., Dict[str, Any]],
-    ) -> Callable[..., Dict[str, Any]]:
-        SUPPORTED_ACTIONS[name] = {
-            "description": description,
-            "func": func,
-            "required_options": required_options or [],
-            "optional_options": optional_options or [],
-            "options_schema": options_schema or {},
-            "return_var": return_var or [],
-        }
+    def decorator(func: Callable[..., Dict[str, Any]]) -> Callable[..., Dict[str, Any]]:
+        # 构造元数据并注册
+        SUPPORTED_ACTIONS[ActionModel.name] = ActionRegisterModel(
+            name=ActionModel.name,
+            description=ActionModel.description,
+            required_options=ActionModel.required_options or [],
+            optional_options=ActionModel.optional_options or [],
+            options_schema=ActionModel.options_schema or {},
+            return_var=ActionModel.return_var,
+        ).dict(exclude_none=True) | {"func": func}
         return func
 
     return decorator
@@ -56,16 +98,7 @@ class ScriptExecutionService:
     """
 
     global_context: Dict[str, Any] = {}
-    __slots__ = [
-        "status",
-        "print_msg",
-        "variables",
-        "execution_history",
-        "start_time",
-        "execution_time",
-        "context",
-        "result_message",
-    ]
+    __slots__ = (ScriptContext.__fields__ | {"print_msg": ""}).keys()
 
     # 类级别的支持动作字典
     def __init__(self, log_level: str = "INFO"):
@@ -77,16 +110,13 @@ class ScriptExecutionService:
         self.start_time = datetime.now().isoformat()
         self.execution_time = "-1"
         self.result_message = ""
-        self.context = lambda: {
-            k: getattr(self, k) for k in self.__slots__ if k != "context"
-        }
         # 根据日志级别设置不同颜色
         level_colors = {
-            "DEBUG": "\033[36m",    # 青色
-            "INFO": "\033[32m",     # 绿色
+            "DEBUG": "\033[36m",  # 青色
+            "INFO": "\033[32m",  # 绿色
             "WARNING": "\033[33m",  # 黄色
-            "ERROR": "\033[31m",    # 红色
-            "CRITICAL": "\033[35m", # 紫色
+            "ERROR": "\033[31m",  # 红色
+            "CRITICAL": "\033[35m",  # 紫色
         }
         reset_color = "\033[0m"
 
@@ -114,6 +144,16 @@ class ScriptExecutionService:
     # 触发器类型
     TRIGGER_TYPES: set[str] = {"time_based", "interval", "event_based"}
 
+    def get_context(self) -> ScriptContext:
+        return ScriptContext(
+            status=self.status,
+            variables=self.variables,
+            execution_history=self.execution_history,
+            start_time=self.start_time,
+            execution_time=self.execution_time,
+            result_message=self.result_message,
+        )
+
     async def execute_script(
         self,
         script_content: Dict[str, Any],
@@ -122,9 +162,7 @@ class ScriptExecutionService:
         script_content_type: str = "json",
     ) -> Dict[str, Any]:
         """执行脚本"""
-        logger.debug(
-            f"{'=' * 20}Executing script <{id(inspect.stack())}>{'=' * 20}"
-        )
+        logger.debug(f"{'=' * 20}Executing script <{id(inspect.stack())}>{'=' * 20}")
         start_time = time.perf_counter()
         # 验证脚本格式
         if isinstance(script_content, str):
@@ -138,25 +176,25 @@ class ScriptExecutionService:
             # logger.debug("Step details: %s", pprint.pformat(step))
             self.status = f"executing step {i + 1}"
             result = await self._execute_step(step, log_history)
-            if result["sub_result"] != "success":
+            if result.sub_result != "success":
                 self.status = "error"
-                logger.error(f"Step {i + 1} failed: {result.get('message', 'Unknown')}")
-                self.result_message = (
-                    f"Step {i + 1} failed: {result.get('message', 'Unknown')}"
-                )
+                logger.error(f"Step {i + 1} failed: {result.message}")
+                self.result_message += f"Step {i + 1} failed: {result.message}\n"
 
                 return
         # 执行完成
         self.execution_time = f"{time.perf_counter() - start_time:.6f}"
         self.status = "completed"
-        self.result_message = f"Script executed successfully with {len(steps)} steps"
+        self.result_message += (
+            f"json Script executed successfully with {len(steps)} steps\n"
+        )
         logger.debug(f"{'=' * 20}execution completed{'=' * 20}")
 
     async def _execute_step(
         self,
         step: Dict[str, Any],
         log_history: bool,
-    ) -> Dict[str, Any]:
+    ) -> SubResultModel:
         """执行单个脚本步骤（异步版本）"""
         action_type: Optional[str] = step.get("action")
         if not action_type:
@@ -182,42 +220,42 @@ class ScriptExecutionService:
             # 记录执行历史
             if log_history:
                 self.execution_history.append(
-                    {
-                        "timestamp": datetime.now().isoformat(),
-                        "action": action_type,
-                        "result": result,
-                    }
+                    ExecuteHistoryeModel(
+                        timestamp=datetime.now().isoformat(),
+                        action=action_type,
+                        action_result=result,
+                    )
                 )
             return result
         except Exception as e:
             error_message = f"Error executing {action_type}: {str(e)}"
             return self._create_error(error_message, tb=format_exc())
 
-    def get_supported_actions_metadata(self) -> Dict[str, Dict[str, Any]]:
+    def get_supported_actions_metadata(self) -> List[Dict[str, ActionRegisterModel]]:
         """获取支持的动作元数据
         Returns:
-            包含所有支持动作元数据的字典
+            包含所有支持动作元数据的列表，过滤 func 字段
         """
-        metadata = {}
-        for action_name, action_data in SUPPORTED_ACTIONS.items():
-            metadata[action_name] = {
-                k: (v.__name__ if k == "func" else v) for k, v in action_data.items()
-            }
-        return metadata
+        return [
+            {k: v for k, v in action.items() if k != "func"}
+            for action in SUPPORTED_ACTIONS.values()
+        ]
 
     @action_register(
-        name="set_var",
-        description="设置变量值",
-        required_options=["name", "value"],
-        options_schema={
-            "name": {"type": "string", "description": "变量名称"},
-            "value": {"type": "any", "description": "变量值"},
-            "eval": {
-                "type": "boolean",
-                "description": "是否对值进行表达式求值",
-                "default": False,
+        ActionRegisterModel(
+            name="set_var",
+            description="设置变量值",
+            required_options=["name", "value"],
+            options_schema={
+                "name": {"type": "string", "description": "变量名称"},
+                "value": {"type": "any", "description": "变量值"},
+                "eval": {
+                    "type": "boolean",
+                    "description": "是否对值进行表达式求值",
+                    "default": False,
+                },
             },
-        },
+        )
     )
     def _set_variable(self, step: Dict[str, Any], log_history: bool) -> Dict[str, Any]:
         """设置变量"""
@@ -232,23 +270,25 @@ class ScriptExecutionService:
             processed_value = self._execute_eval(processed_value, log_history=False)
         self.variables[var_name] = processed_value
         logger.debug(f"[set_var] '{var_name}' set to '{processed_value}'")
-        return {
-            "sub_result": "success",
-            "message": f"Variable '{var_name}' set to '{processed_value}'",
-        }
+        return SubResultModel(
+            sub_result="success",
+            message=f"Variable '{var_name}' set to '{processed_value}'",
+        )
 
     @action_register(
-        name="print_msg",
-        description="打印消息",
-        required_options=["message"],
-        options_schema={
-            "message": {"type": "string", "description": "要打印的消息"},
-            "eval": {
-                "type": "boolean",
-                "description": "是否对消息进行表达式求值",
-                "default": False,
+        ActionRegisterModel(
+            name="print_msg",
+            description="打印消息",
+            required_options=["message"],
+            options_schema={
+                "message": {"type": "string", "description": "要打印的消息"},
+                "eval": {
+                    "type": "boolean",
+                    "description": "是否对消息进行表达式求值",
+                    "default": False,
+                },
             },
-        },
+        )
     )
     def _print(self, step: Dict[str, Any], log_history: bool) -> Dict[str, Any]:
         """打印消息"""
@@ -261,25 +301,27 @@ class ScriptExecutionService:
         if eval_value:
             message = self._execute_eval(message, log_history=False)
         self.print_msg.put_nowait(f"{message}\n")
-        return {
-            "sub_result": "success",
-            "message": f"Printed message: {str(message)[:100]}",
-        }
+        return SubResultModel(
+            sub_result="success",
+            message=f"Printed message: {str(message)[:100]}",
+        )
 
     @action_register(
-        name="execute_command",
-        description="执行系统命令",
-        required_options=["command"],
-        optional_options=["shell", "timeout"],
-        options_schema={
-            "command": {"type": "string|list", "description": "要执行的命令"},
-            "shell": {"type": "boolean", "description": "是否通过shell执行"},
-            "timeout": {"type": "number", "description": "超时时间（秒）"},
-        },
-        return_var=[
-            {"name": "stdout", "type": "string"},
-            {"name": "stderr", "type": "string"},
-        ],
+        ActionRegisterModel(
+            name="execute_command",
+            description="执行系统命令",
+            required_options=["command"],
+            optional_options=["shell", "timeout"],
+            options_schema={
+                "command": {"type": "string|list", "description": "要执行的命令"},
+                "shell": {"type": "boolean", "description": "是否通过shell执行"},
+                "timeout": {"type": "number", "description": "超时时间（秒）"},
+            },
+            return_var=[
+                {"name": "stdout", "type": "string"},
+                {"name": "stderr", "type": "string"},
+            ],
+        )
     )
     async def _execute_command(
         self, step: Dict[str, Any], log_history: bool
@@ -311,10 +353,10 @@ class ScriptExecutionService:
             self.variables["stdout"] = result.stdout
             self.variables["stderr"] = result.stderr
             logger.debug(f"[execute_command] Command: {command}")
-            return {
-                "sub_result": "success",
-                "message": f"Command executed with exit code {result.returncode}",
-            }
+            return result(
+                sub_result="success",
+                message=f"Command executed with exit code {result.returncode}",
+            )
         except subprocess.TimeoutExpired:
             return self._create_error("Command execution timed out")
         except Exception as e:
@@ -324,12 +366,14 @@ class ScriptExecutionService:
             )
 
     @action_register(
-        name="eval",
-        description="执行表达式",
-        required_options=["expression"],
-        options_schema={
-            "expression": {"type": "string", "description": "要执行的表达式"}
-        },
+        ActionRegisterModel(
+            name="eval",
+            description="执行表达式",
+            required_options=["expression"],
+            options_schema={
+                "expression": {"type": "string", "description": "要执行的表达式"}
+            },
+        )
     )
     def _execute_eval(self, expression: str, log_history: bool) -> Any:
         safe_env: Dict[str, Any] = {"__builtins__": self.variables}
@@ -344,14 +388,16 @@ class ScriptExecutionService:
             raise ValueError(f"Invalid _execute_eval: {str(e)}", tb=format_exc())
 
     @action_register(
-        name="condition",
-        description="条件判断",
-        required_options=["condition", "if_true", "if_false"],
-        options_schema={
-            "condition": {"type": "string", "description": "条件表达式"},
-            "if_true": {"type": "array", "description": "条件为真时执行的步骤"},
-            "if_false": {"type": "array", "description": "条件为假时执行的步骤"},
-        },
+        ActionRegisterModel(
+            name="condition",
+            description="条件判断",
+            required_options=["condition", "if_true", "if_false"],
+            options_schema={
+                "condition": {"type": "string", "description": "条件表达式"},
+                "if_true": {"type": "array", "description": "条件为真时执行的步骤"},
+                "if_false": {"type": "array", "description": "条件为假时执行的步骤"},
+            },
+        )
     )
     async def _execute_condition(
         self, step: Dict[str, Any], log_history: bool
@@ -371,13 +417,13 @@ class ScriptExecutionService:
             steps_to_execute: List[Dict[str, Any]] = if_true if result else if_false
             for sub_step in steps_to_execute:
                 sub_result = await self._execute_step(sub_step, log_history)
-                if sub_result.get("type") == "error":
+                if sub_result.sub_result == "error":
                     return sub_result
             logger.debug(f"[condition] Condition: {condition}, Result: {result}")
-            return {
-                "sub_result": "success",
-                "message": f"Condition result: {result}",
-            }
+            return SubResultModel(
+                sub_result="success",
+                message=f"Condition result: {result}",
+            )
         except Exception as e:
             logger.error(f"Condition evaluation failed: {str(e)}", exc_info=True)
             return self._create_error(
@@ -385,18 +431,20 @@ class ScriptExecutionService:
             )
 
     @action_register(
-        name="loop",
-        description="循环执行",
-        required_options=["condition", "loop_steps"],
-        options_schema={
-            "condition": {"type": "string", "description": "循环条件"},
-            "loop_steps": {"type": "array", "description": "循环执行的步骤"},
-            "max_iterations": {
-                "type": "number",
-                "description": "最大迭代次数",
-                "default": 10000,
+        ActionRegisterModel(
+            name="loop",
+            description="循环执行",
+            required_options=["condition", "loop_steps"],
+            options_schema={
+                "condition": {"type": "string", "description": "循环条件"},
+                "loop_steps": {"type": "array", "description": "循环执行的步骤"},
+                "max_iterations": {
+                    "type": "number",
+                    "description": "最大迭代次数",
+                    "default": 10000,
+                },
             },
-        },
+        )
     )
     async def _execute_loop(
         self, step: Dict[str, Any], log_history: bool
@@ -405,7 +453,9 @@ class ScriptExecutionService:
         condition: Optional[str] = step.get("condition")  # while循环的条件
         loop_steps: List[Dict[str, Any]] = step.get("loop_steps", [])
         max_iterations: int = step.get("max_iterations", 1000)  # 防止无限循环
-        logger.debug(f"[loop] Condition: {condition}, max_iterations: {max_iterations}, loop_steps: {pprint.pformat(loop_steps)}")
+        logger.debug(
+            f"[loop] Condition: {condition}, max_iterations: {max_iterations}, loop_steps: {pprint.pformat(loop_steps)}"
+        )
         try:
             if not condition:
                 return self._create_error("While loop requires a condition")
@@ -419,28 +469,30 @@ class ScriptExecutionService:
                     break
                 for sub_step in loop_steps:
                     sub_result = await self._execute_step(sub_step, log_history=False)
-                    if sub_result.get("type") == "error":
+                    if sub_result.sub_result == "error":
                         return sub_result
                 iteration_count += 1
-            return {
-                "sub_result": "success",
-                "message": f"Executed {iteration_count} iterations",
-            }
+            return SubResultModel(
+                sub_result="success",
+                message=f"Executed {iteration_count} iterations",
+            )
         except Exception as e:
             return self._create_error(f"Loop execution failed: {str(e)}")
 
     @action_register(
-        name="delay",
-        description="延时等待",
-        required_options=["seconds"],
-        options_schema={
-            "seconds": {"type": "number", "description": "延时秒数"},
-            "eval": {
-                "type": "boolean",
-                "description": "是否对秒数进行表达式求值",
-                "default": False,
+        ActionRegisterModel(
+            name="delay",
+            description="延时等待",
+            required_options=["seconds"],
+            options_schema={
+                "seconds": {"type": "number", "description": "延时秒数"},
+                "eval": {
+                    "type": "boolean",
+                    "description": "是否对秒数进行表达式求值",
+                    "default": False,
+                },
             },
-        },
+        )
     )
     async def _execute_delay(
         self, step: Dict[str, Any], log_history: bool
@@ -455,27 +507,29 @@ class ScriptExecutionService:
             # 使用异步sleep代替同步sleep
             await asyncio.sleep(float(delay_seconds))
             logger.debug(f"[delay] Delayed for {delay_seconds} seconds")
-            return {
-                "sub_result": "success",
-                "message": f"Delayed for {delay_seconds} seconds",
-            }
+            return SubResultModel(
+                sub_result="success",
+                message=f"Delayed for {delay_seconds} seconds",
+            )
         except ValueError:
             return self._create_error("Invalid delay seconds value")
 
     @action_register(
-        name="trigger",
-        description="设置触发器",
-        required_options=["type", "steps"],
-        optional_options=["config"],
-        options_schema={
-            "type": {
-                "type": "enum",
-                "description": "触发器类型",
-                "enum": ["time_based", "interval", "event_based"],
+        ActionRegisterModel(
+            name="trigger",
+            description="设置触发器",
+            required_options=["type", "steps"],
+            optional_options=["config"],
+            options_schema={
+                "type": {
+                    "type": "enum",
+                    "description": "触发器类型",
+                    "enum": ["time_based", "interval", "event_based"],
+                },
+                "steps": {"type": "array", "description": "触发时执行的步骤"},
+                "config": {"type": "object", "description": "触发器配置"},
             },
-            "steps": {"type": "array", "description": "触发时执行的步骤"},
-            "config": {"type": "object", "description": "触发器配置"},
-        },
+        )
     )
     def _execute_trigger(
         self, step: Dict[str, Any], log_history: bool
@@ -493,84 +547,96 @@ class ScriptExecutionService:
                 return self._create_error("Time-based trigger requires a time")
             # 这里只是记录触发器，实际定时执行需要外部调度器
             logger.debug(f"[trigger] time_based scheduled for {scheduled_time}")
-            return {
-                "sub_result": "success",
-                "message": f"Trigger time_based scheduled for {scheduled_time}",
-            }
+            return SubResultModel(
+                sub_result="success",
+                message=f"Trigger time_based scheduled for {scheduled_time}",
+            )
         elif trigger_type == "interval":
             # 基于时间间隔的触发器
             interval_seconds: Optional[int] = step.get("interval")
             if not interval_seconds:
                 return self._create_error("Interval trigger requires an interval")
-            logger.debug(f"[trigger] interval trigger set to {interval_seconds} seconds")
-            return {
-                "sub_result": "success",
-                "message": f"Interval trigger set to {interval_seconds} seconds",
-            }
+            logger.debug(
+                f"[trigger] interval trigger set to {interval_seconds} seconds"
+            )
+            return SubResultModel(
+                sub_result="success",
+                message=f"Interval trigger set to {interval_seconds} seconds",
+            )
         elif trigger_type == "event_based":
             # 基于事件的触发器
             event_name: Optional[str] = step.get("event")
             if not event_name:
                 return self._create_error("Event-based trigger requires an event name")
             logger.debug(f"[trigger] event_based trigger set for event: {event_name}")
-            return {
-                "sub_result": "success",
-                "message": f"Event trigger set for event: {event_name}",
-            }
+            return SubResultModel(
+                sub_result="success",
+                message=f"Event trigger set for event: {event_name}",
+            )
         return self._create_error(f"Unknown trigger type: {trigger_type}")
 
     @action_register(
-        name="http_request",
-        description="执行HTTP请求",
-        options_schema={
-            "url": {"type": "string", "required": True, "description": "请求URL"},
-            "method": {
-                "type": "enum",
-                "default": "GET",
-                "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
-                "description": "HTTP方法",
+        ActionRegisterModel(
+            name="http_request",
+            description="执行HTTP请求",
+            options_schema={
+                "url": {"type": "string", "required": True, "description": "请求URL"},
+                "method": {
+                    "type": "enum",
+                    "default": "GET",
+                    "enum": [
+                        "GET",
+                        "POST",
+                        "PUT",
+                        "DELETE",
+                        "PATCH",
+                        "HEAD",
+                        "OPTIONS",
+                    ],
+                    "description": "HTTP方法",
+                },
+                "headers": {"type": "array", "description": "HTTP请求头"},
+                "params": {"type": "array", "description": "URL查询参数"},
+                "cookies": {"type": "array", "description": "Cookies"},
+                "proxy": {"type": "string", "description": "代理URL"},
+                "content_type": {"type": "string", "description": "Content-Type"},
+                "data": {"type": "string", "description": "请求体数据"},
+                "json": {"type": "json", "description": "JSON请求体"},
+                "timeout": {"type": "number", "description": "超时时间（秒）"},
+                "allow_redirects": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "是否允许重定向",
+                },
+                "verify_ssl": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "是否验证SSL证书",
+                },
+                "return_json": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "是否返回JSON格式",
+                },
             },
-            "headers": {"type": "array", "description": "HTTP请求头"},
-            "params": {"type": "array", "description": "URL查询参数"},
-            "cookies": {"type": "array", "description": "Cookies"},
-            "proxy": {"type": "string", "description": "代理URL"},
-            "content_type": {"type": "string", "description": "Content-Type"},
-            "data": {"type": "string", "description": "请求体数据"},
-            "json": {"type": "json", "description": "JSON请求体"},
-            "timeout": {"type": "number", "description": "超时时间（秒）"},
-            "allow_redirects": {
-                "type": "boolean",
-                "default": True,
-                "description": "是否允许重定向",
-            },
-            "verify_ssl": {
-                "type": "boolean",
-                "default": True,
-                "description": "是否验证SSL证书",
-            },
-            "return_json": {
-                "type": "boolean",
-                "default": False,
-                "description": "是否返回JSON格式",
-            },
-        },
-        optional_options=[
-            "headers",
-            "params",
-            "cookies",
-            "proxy",
-            "content_type",
-            "data",
-            "json",
-            "timeout",
-            "allow_redirects",
-            "verify_ssl",
-            "return_json",
-        ],
-        return_var=[
-            {"name": "response_headers", "type": "dict"},
-            {"name": "status", "type": "number"},
-        ],
+            optional_options=[
+                "headers",
+                "params",
+                "cookies",
+                "proxy",
+                "content_type",
+                "data",
+                "json",
+                "timeout",
+                "allow_redirects",
+                "verify_ssl",
+                "return_json",
+            ],
+            return_var=[
+                {"name": "response_headers", "type": "dict"},
+                {"name": "status", "type": "number"},
+            ],
+        )
     )
     async def _execute_http_request(
         self, step: Dict[str, Any], log_history: bool
@@ -578,6 +644,7 @@ class ScriptExecutionService:
         """执行HTTP请求（异步版本）"""
         try:
             import aiohttp
+
             # 获取基本参数
             url = step.get("url")
             method = step.get("method", "GET").upper()
@@ -653,11 +720,11 @@ class ScriptExecutionService:
                     self.variables["response"] = response_data
                     self.variables["status"] = response.status
                     self.variables["response_headers"] = dict(response.headers)
-                    logger.debug(f"[http_request] {pprint.pformat(result_params)}")   
-                    return {
-                        "sub_result": "success",
-                        "message": f"HTTP request {method} {result_params['url']} status: {response.status}",
-                    }
+                    logger.debug(f"[http_request] {pprint.pformat(result_params)}")
+                    return SubResultModel(
+                        sub_result="success",
+                        message=f"HTTP request {method} {result_params['url']} status: {response.status}",
+                    )
         except ImportError:
             return self._create_error("aiohttp library is required for HTTP requests.")
         except Exception as e:
@@ -666,14 +733,16 @@ class ScriptExecutionService:
             )
 
     @action_register(
-        name="combine_data",
-        description="合并数据",
-        required_options=["data_sources"],
-        optional_options=["output_var"],
-        options_schema={
-            "data_sources": {"type": "array", "description": "数据源列表"},
-            "output_var": {"type": "string", "description": "输出变量名"},
-        },
+        ActionRegisterModel(
+            name="combine_data",
+            description="合并数据",
+            required_options=["data_sources"],
+            optional_options=["output_var"],
+            options_schema={
+                "data_sources": {"type": "array", "description": "数据源列表"},
+                "output_var": {"type": "string", "description": "输出变量名"},
+            },
+        )
     )
     def _combine_data(self, step: Dict[str, Any], log_history: bool) -> Dict[str, Any]:
         """合并数据"""
@@ -693,11 +762,13 @@ class ScriptExecutionService:
                 # 如果是直接数据，直接合并
                 combined_data.update(source)
         self.variables[output_var] = combined_data
-        logger.debug(f"[combine_data] sources: {pprint.pformat(sources)} -> {pprint.pformat(combined_data)}")
-        return {
-            "sub_result": "success",
-            "message": f"Combined data saved to {output_var}",
-        }
+        logger.debug(
+            f"[combine_data] sources: {pprint.pformat(sources)} -> {pprint.pformat(combined_data)}"
+        )
+        return SubResultModel(
+            sub_result="success",
+            message=f"Combined data saved to {output_var}",
+        )
 
     def _process_variable_references(
         self, value: Union[str, Dict[str, Any], List[Any]]
@@ -810,49 +881,66 @@ class ScriptExecutionService:
                 "min": min,
                 "max": max,
             }
+            logger.debug(f"[_execute_python_script] {script_content}")
             # 异步执行脚本
             await asyncio.to_thread(
                 exec, script_content, {"__builtins__": safe_builtins}, local_vars
             )
             self.execution_time = f"{time.perf_counter() - start_time:.6f}"
             self.status = "completed"
-            self.result_message = "Python Script executed successfully with exec"
-            logger.debug(f"[_execute_python_script] {script_content}")
+            self.result_message += "Python Script executed successfully with exec\n"
             logger.debug(f"{'=' * 20}execution completed{'=' * 20}")
         except Exception:
+            self.status = "error"
+            self.result_message += "Python Script execution failed\n"
+            self._create_error(message="Python脚本执行错误", tb=format_exc())
             logger.error(f"Python脚本执行错误: {format_exc()}")
 
-    async def flush_print_queue(
-        self, callback: Callable, interval: float = 0.5, timeout: float = 60.0
-    ):
+    async def flush_print_queue(self, callback: Callable, timeout: float = 60.0):
         """
-        定期将打印队列中的消息刷新给回调函数，直到队列为空且状态为已完成
+        自动监控打印队列中的消息并刷新给回调函数，直到队列为空且状态为已完成
         """
-        timeout_seconds = 0
-        logger.info(f"刷新打印队列中的消息 任务开始，interval: {interval}, timeout: {timeout}")
+        logger.info(f"刷新打印队列中的消息 任务开始，timeout: {timeout}")
+        start_time = time.perf_counter()
+
         while True:
-            while True:
-                try:
-                    callback(self.print_msg.get_nowait())
-                except asyncio.QueueEmpty:
+            try:
+                if timeout > 0:
+                    elapsed = time.perf_counter() - start_time
+                    remaining_timeout = max(0, timeout - elapsed)
+                    if remaining_timeout <= 0:
+                        logger.error(f"flush_print_queue 任务超时，已等待 {timeout} 秒")
+                        break
+                    message = await asyncio.wait_for(
+                        self.print_msg.get(), remaining_timeout
+                    )
+                else:
+                    message = await self.print_msg.get()
+                    self.print_msg.task_done()
+
+                callback(message)
+
+                if self.print_msg.empty() and self.status == "completed":
+                    logger.info("打印队列已清空，flush_print_queue 任务完成")
                     break
-            await asyncio.sleep(interval)  # 添加适当的延迟
-            timeout_seconds += interval
-            if self.print_msg.empty() and self.status == "completed":
-                logger.info("打印队列已清空，flush_print_queue 任务完成")
-                break
-            if timeout_seconds > timeout:
-                logger.error(f"flush_print_queue 任务超时，已等待 {timeout_seconds} 秒")
+
+            except asyncio.TimeoutError:
+                if self.print_msg.empty() and self.status == "completed":
+                    logger.info(
+                        f"超时, {timeout} 秒后打印队列已清空，flush_print_queue 任务完成"
+                    )
+                else:
+                    logger.error(f"flush_print_queue 任务超时，已等待 {timeout} 秒")
                 break
 
-    def _create_error(self, message: str, tb: str = "") -> Dict[str, Any]:
+    def _create_error(self, message: str, tb: str = "") -> SubResultModel:
         """创建错误响应"""
         if tb:
             self.print_msg.put_nowait(f"\n{tb}")
         caller_name = inspect.stack()[1].function
         logger.error(f"[func: {caller_name}] {message}")
-        return {
-            "sub_result": "error",
-            "message": f"[func: {caller_name}] {message}",
-            "traceback": tb,
-        }
+        return SubResultModel(
+            sub_result="error",
+            message=f"[func: {caller_name}] {message}",
+            tb=tb,
+        )

@@ -58,17 +58,24 @@ async def run_all_tests():
     S = ScriptExecutionService(log_level="DEBUG")
 
     # 打印元数据
+    print("支持的操作元数据:")
     pprint(S.get_supported_actions_metadata())
+    print("-" * 20)
 
     # 测试脚本执行服务
-    result = await S.execute_script(
-        script_content="print('hello world')", script_content_type="python"
+    await S.execute_script(
+        script_content="print('hello world');eval('print(\"hello eval\")')",
+        script_content_type="python",
     )
-    pprint(result)
 
     # 创建任务
     status_task = asyncio.create_task(
-        S.flush_print_queue(lambda msg: print(f"{S.status}: {msg}", end=""), timeout=30)
+        S.flush_print_queue(
+            lambda msg: print(
+                f"打印任务 status {S.status}: {msg} 执行上下文={S.get_context().model_dump(mode='python')}"
+            ),
+            timeout=20,
+        )
     )
     script_task = asyncio.create_task(
         S.execute_script(
@@ -78,7 +85,11 @@ async def run_all_tests():
     # 等待所有任务完成
     await asyncio.gather(script_task, status_task)
 
-    pprint(S.context())
+    # 先后执行相同脚本
+    # await S.execute_script(
+    #     script_content="print('hello world');eval('print(\"hello eval\")')", script_content_type="python"
+    # )
+    # await S.flush_print_queue(lambda msg: print(f"{S.status}: {msg}", end=""), timeout=30)
 
 
 if __name__ == "__main__":
