@@ -98,7 +98,7 @@ class ScriptExecutionRequest(BaseModel):
         None, description="Optional parameters to pass to the script"
     )
     timeout: Optional[int] = Field(
-        30, ge=5, le=300, description="Execution timeout in seconds (5-300)"
+        30, description="Execution timeout in seconds (default 30)"
     )
 
 

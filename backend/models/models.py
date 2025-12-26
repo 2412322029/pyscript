@@ -1,7 +1,18 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, JSON, Float
+import datetime
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
-import datetime
 
 Base = declarative_base()
 
@@ -26,7 +37,7 @@ class Script(Base):
     nid = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True)
     content = Column(Text)
-    project_id = Column(Integer, ForeignKey("projects.id"))
+    project_id = Column(Integer, ForeignKey("projects.nid"))
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     
@@ -50,7 +61,7 @@ class Task(Base):
     __tablename__ = "tasks"
     
     nid = Column(Integer, primary_key=True, index=True)
-    script_id = Column(Integer, ForeignKey("scripts.id"))
+    script_id = Column(Integer, ForeignKey("scripts.nid"))
     status = Column(String(50), default="pending")
     result = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
@@ -66,7 +77,7 @@ class Flow(Base):
     nid = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True)
     description = Column(Text)
-    project_id = Column(Integer, ForeignKey("projects.id"))
+    project_id = Column(Integer, ForeignKey("projects.nid"))
     nodes = Column(JSON, default=[])
     connections = Column(JSON, default=[])
     selected = Column(JSON, default=[])

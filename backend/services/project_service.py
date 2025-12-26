@@ -22,14 +22,14 @@ class ProjectService:
     @staticmethod
     def get_project(db: Session, project_id: int) -> Optional[Project]:
         """根据ID获取项目"""
-        return db.query(Project).filter(Project.id == project_id).first()
+        return db.query(Project).filter(Project.nid == project_id).first()
 
     @staticmethod
     def update_project(
         db: Session, project_id: int, name: str = None, description: str = None
     ) -> Optional[Project]:
         """更新项目信息"""
-        db_project = db.query(Project).filter(Project.id == project_id).first()
+        db_project = db.query(Project).filter(Project.nid == project_id).first()
         if db_project:
             if name is not None:
                 db_project.name = name
@@ -43,7 +43,7 @@ class ProjectService:
     @staticmethod
     def delete_project(db: Session, project_id: int) -> bool:
         """删除项目"""
-        db_project = db.query(Project).filter(Project.id == project_id).first()
+        db_project = db.query(Project).filter(Project.nid == project_id).first()
         if db_project:
             db.delete(db_project)
             db.commit()

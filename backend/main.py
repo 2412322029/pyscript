@@ -1,24 +1,20 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Depends, Request
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.exceptions import RequestValidationError
-from contextlib import asynccontextmanager
 import asyncio
-import os
 import logging
-import json
-import traceback
-from typing import Dict, Any, Optional, List
+import os
+from contextlib import asynccontextmanager
+
+from api.routes import api_router
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from middleware.exception_handlers import register_exception_handlers
+from middleware.logging_config import configure_logging
+
+# Local imports
+from models.database import init_db
 
 # Database imports
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.exc import SQLAlchemyError
-
 # Task queue imports
-from huey import RedisHuey
-from tasks import run_python_script, process_script_result, cleanup_old_tasks
+from tasks import cleanup_old_tasks
 
 # Logging configuration
 logging.basicConfig(
@@ -27,27 +23,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-# Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pyscript.db")
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-# Huey configuration
-from tasks import huey_app as huey
-
-# Local imports
-from models.database import get_db, engine
-from models.models import Base
-from services.script_execution_service import ScriptExecutionService
-from tasks import cleanup_old_tasks
-from middleware.exception_handlers import register_exception_handlers
-from api.routes import api_router  # 修改导入路径
-from middleware.logging_config import configure_logging
 
 # Configure logging
 logging_config = configure_logging()
@@ -73,9 +48,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Create database tables
-Base.metadata.create_all(bind=engine)
-
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -90,9 +62,7 @@ register_exception_handlers(app)
 
 # Include API routes
 app.include_router(api_router, prefix="/api")
-
-# Initialize services
-script_service = ScriptExecutionService()
+init_db()
 
 
 async def periodic_cleanup():
@@ -112,4 +82,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
-

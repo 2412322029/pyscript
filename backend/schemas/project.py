@@ -26,7 +26,7 @@ class ProjectUpdate(BaseModel):
 
 
 class ProjectInDBBase(ProjectBase):
-    id: int = Field(..., description="Project ID")
+    nid: int = Field(..., description="Project ID")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
 

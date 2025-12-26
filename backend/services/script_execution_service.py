@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import logging
+import pprint
 import re
 import subprocess
 import time
@@ -8,11 +9,6 @@ from datetime import datetime
 from traceback import format_exc
 from typing import Any, Callable, Dict, List, Optional, Union
 
-# 配置日志
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 SUPPORTED_ACTIONS: Dict[str, Dict[str, Any]] = {}
@@ -72,16 +68,48 @@ class ScriptExecutionService:
     ]
 
     # 类级别的支持动作字典
-    def __init__(self, log_level=logging.INFO):
+    def __init__(self, log_level: str = "INFO"):
         """初始化脚本执行服务"""
         self.status = "created"
-        self.print_msg = asyncio.Queue()
+        self.print_msg = asyncio.Queue(10)
         self.variables = {}
         self.execution_history = []
         self.start_time = datetime.now().isoformat()
         self.execution_time = "-1"
         self.result_message = ""
-        self.context = lambda: {k: getattr(self, k) for k in self.__slots__ if k != "context"}
+        self.context = lambda: {
+            k: getattr(self, k) for k in self.__slots__ if k != "context"
+        }
+        # 根据日志级别设置不同颜色
+        level_colors = {
+            "DEBUG": "\033[36m",    # 青色
+            "INFO": "\033[32m",     # 绿色
+            "WARNING": "\033[33m",  # 黄色
+            "ERROR": "\033[31m",    # 红色
+            "CRITICAL": "\033[35m", # 紫色
+        }
+        reset_color = "\033[0m"
+
+        class ColoredFormatter(logging.Formatter):
+            def format(self, record):
+                # 获取原始格式
+                original = super().format(record)
+                # 根据级别添加颜色
+                color = level_colors.get(record.levelname, "")
+                return f"{color}{original}{reset_color}"
+
+        # 配置日志，使用自定义带颜色的 Formatter
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            ColoredFormatter(
+                fmt="%(asctime)s - %(levelname)s -> %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        logging.basicConfig(
+            level=logging.getLevelName(log_level),
+            handlers=[handler],
+        )
 
     # 触发器类型
     TRIGGER_TYPES: set[str] = {"time_based", "interval", "event_based"}
@@ -94,30 +122,35 @@ class ScriptExecutionService:
         script_content_type: str = "json",
     ) -> Dict[str, Any]:
         """执行脚本"""
+        logger.debug(
+            f"{'=' * 20}Executing script <{id(inspect.stack())}>{'=' * 20}"
+        )
         start_time = time.perf_counter()
         # 验证脚本格式
         if isinstance(script_content, str):
-            return await self._execute_python_script(script_content)
+            return await self._execute_python_script(script_content, start_time)
         # 初始化执行上下文
         self.variables.update(variables or {})
         # 获取步骤列表
         steps = script_content.get("steps", [])
         # 执行步骤
         for i, step in enumerate(steps):
-            logger.debug("Step details: %s", step)
+            # logger.debug("Step details: %s", pprint.pformat(step))
             self.status = f"executing step {i + 1}"
             result = await self._execute_step(step, log_history)
             if result["sub_result"] != "success":
                 self.status = "error"
-                logger.error(
-                    "Step %d failed: %s", i + 1, result.get("message", "Unknown error")
+                logger.error(f"Step {i + 1} failed: {result.get('message', 'Unknown')}")
+                self.result_message = (
+                    f"Step {i + 1} failed: {result.get('message', 'Unknown')}"
                 )
-                self.result_message = f"Step {i + 1} failed: {result.get('message', 'Unknown error')}"
+
+                return
         # 执行完成
         self.execution_time = f"{time.perf_counter() - start_time:.6f}"
         self.status = "completed"
         self.result_message = f"Script executed successfully with {len(steps)} steps"
-        self.print_msg.put_nowait("f-i-n-i-s-h")
+        logger.debug(f"{'=' * 20}execution completed{'=' * 20}")
 
     async def _execute_step(
         self,
@@ -142,7 +175,6 @@ class ScriptExecutionService:
                     )
             # 获取注册的动作函数
             action_func = action_metadata.get("func")
-            # print(f"执行动作函数: {action_type}，参数: {params}")
             if asyncio.iscoroutinefunction(action_func):
                 result = await action_func(self, step=step, log_history=log_history)
             else:
@@ -199,6 +231,7 @@ class ScriptExecutionService:
         if eval_value:
             processed_value = self._execute_eval(processed_value, log_history=False)
         self.variables[var_name] = processed_value
+        logger.debug(f"[set_var] '{var_name}' set to '{processed_value}'")
         return {
             "sub_result": "success",
             "message": f"Variable '{var_name}' set to '{processed_value}'",
@@ -277,6 +310,7 @@ class ScriptExecutionService:
             self.variables["exit_code"] = result.returncode
             self.variables["stdout"] = result.stdout
             self.variables["stderr"] = result.stderr
+            logger.debug(f"[execute_command] Command: {command}")
             return {
                 "sub_result": "success",
                 "message": f"Command executed with exit code {result.returncode}",
@@ -302,7 +336,9 @@ class ScriptExecutionService:
         if self._is_dangerous_expression(expression):
             raise ValueError("Expression contains potentially dangerous operations")
         try:
-            return eval(expression, safe_env)
+            result = eval(expression, safe_env)
+            logger.debug(f"[eval] Expression: {expression} -> {result}")
+            return result
         except Exception as e:
             logger.error(f"_execute_eval failed: {str(e)}", exc_info=True)
             raise ValueError(f"Invalid _execute_eval: {str(e)}", tb=format_exc())
@@ -337,6 +373,7 @@ class ScriptExecutionService:
                 sub_result = await self._execute_step(sub_step, log_history)
                 if sub_result.get("type") == "error":
                     return sub_result
+            logger.debug(f"[condition] Condition: {condition}, Result: {result}")
             return {
                 "sub_result": "success",
                 "message": f"Condition result: {result}",
@@ -368,6 +405,7 @@ class ScriptExecutionService:
         condition: Optional[str] = step.get("condition")  # while循环的条件
         loop_steps: List[Dict[str, Any]] = step.get("loop_steps", [])
         max_iterations: int = step.get("max_iterations", 1000)  # 防止无限循环
+        logger.debug(f"[loop] Condition: {condition}, max_iterations: {max_iterations}, loop_steps: {pprint.pformat(loop_steps)}")
         try:
             if not condition:
                 return self._create_error("While loop requires a condition")
@@ -376,7 +414,8 @@ class ScriptExecutionService:
                 if iteration_count >= max_iterations:
                     return self._create_error("Loop exceeded maximum iterations")
                 processed_condition: str = self._process_variable_references(condition)
-                if not self._safe_eval(processed_condition):
+                condition_result: bool = self._safe_eval(processed_condition)
+                if not condition_result:
                     break
                 for sub_step in loop_steps:
                     sub_result = await self._execute_step(sub_step, log_history=False)
@@ -415,6 +454,7 @@ class ScriptExecutionService:
         try:
             # 使用异步sleep代替同步sleep
             await asyncio.sleep(float(delay_seconds))
+            logger.debug(f"[delay] Delayed for {delay_seconds} seconds")
             return {
                 "sub_result": "success",
                 "message": f"Delayed for {delay_seconds} seconds",
@@ -452,6 +492,7 @@ class ScriptExecutionService:
             if not scheduled_time:
                 return self._create_error("Time-based trigger requires a time")
             # 这里只是记录触发器，实际定时执行需要外部调度器
+            logger.debug(f"[trigger] time_based scheduled for {scheduled_time}")
             return {
                 "sub_result": "success",
                 "message": f"Trigger time_based scheduled for {scheduled_time}",
@@ -461,6 +502,7 @@ class ScriptExecutionService:
             interval_seconds: Optional[int] = step.get("interval")
             if not interval_seconds:
                 return self._create_error("Interval trigger requires an interval")
+            logger.debug(f"[trigger] interval trigger set to {interval_seconds} seconds")
             return {
                 "sub_result": "success",
                 "message": f"Interval trigger set to {interval_seconds} seconds",
@@ -470,6 +512,7 @@ class ScriptExecutionService:
             event_name: Optional[str] = step.get("event")
             if not event_name:
                 return self._create_error("Event-based trigger requires an event name")
+            logger.debug(f"[trigger] event_based trigger set for event: {event_name}")
             return {
                 "sub_result": "success",
                 "message": f"Event trigger set for event: {event_name}",
@@ -535,7 +578,6 @@ class ScriptExecutionService:
         """执行HTTP请求（异步版本）"""
         try:
             import aiohttp
-
             # 获取基本参数
             url = step.get("url")
             method = step.get("method", "GET").upper()
@@ -611,6 +653,7 @@ class ScriptExecutionService:
                     self.variables["response"] = response_data
                     self.variables["status"] = response.status
                     self.variables["response_headers"] = dict(response.headers)
+                    logger.debug(f"[http_request] {pprint.pformat(result_params)}")   
                     return {
                         "sub_result": "success",
                         "message": f"HTTP request {method} {result_params['url']} status: {response.status}",
@@ -635,6 +678,7 @@ class ScriptExecutionService:
     def _combine_data(self, step: Dict[str, Any], log_history: bool) -> Dict[str, Any]:
         """合并数据"""
         sources: List[Union[str, Dict[str, Any]]] = step.get("data_sources", [])
+        sources = [self._process_variable_references(source) for source in sources]
         output_var: Optional[str] = step.get("output_var")
         if not output_var:
             return self._create_error("Output variable is required for data combining")
@@ -649,6 +693,7 @@ class ScriptExecutionService:
                 # 如果是直接数据，直接合并
                 combined_data.update(source)
         self.variables[output_var] = combined_data
+        logger.debug(f"[combine_data] sources: {pprint.pformat(sources)} -> {pprint.pformat(combined_data)}")
         return {
             "sub_result": "success",
             "message": f"Combined data saved to {output_var}",
@@ -687,6 +732,7 @@ class ScriptExecutionService:
         # 构建安全的评估环境
         safe_env: Dict[str, Any] = {"__builtins__": self.variables}
         # 检查表达式中是否有危险操作
+        expression = self._process_variable_references(expression)
         if self._is_dangerous_expression(expression):
             raise ValueError("Expression contains potentially dangerous operations")
         # 执行安全评估
@@ -743,12 +789,12 @@ class ScriptExecutionService:
         return False
 
     async def _execute_python_script(
-        self, script_content: str, variables: Optional[Dict[str, Any]] = None
+        self, script_content: str, start_time
     ) -> Dict[str, Any]:
         """执行简单的Python脚本（兼容模式，异步版本）"""
         try:
             # 创建安全的执行环境
-            local_vars: Dict[str, Any] = variables.copy() if variables else {}
+            local_vars: Dict[str, Any] = self.variables.copy()
             # 添加必要的内置函数到__builtins__字典中
             safe_builtins = {
                 "print": print,
@@ -768,19 +814,43 @@ class ScriptExecutionService:
             await asyncio.to_thread(
                 exec, script_content, {"__builtins__": safe_builtins}, local_vars
             )
-            return {
-                "status": "success",
-                "message": "Python script executed successfully",
-            }
+            self.execution_time = f"{time.perf_counter() - start_time:.6f}"
+            self.status = "completed"
+            self.result_message = "Python Script executed successfully with exec"
+            logger.debug(f"[_execute_python_script] {script_content}")
+            logger.debug(f"{'=' * 20}execution completed{'=' * 20}")
         except Exception:
             logger.error(f"Python脚本执行错误: {format_exc()}")
-            return {"status": "error", "error": format_exc()}
+
+    async def flush_print_queue(
+        self, callback: Callable, interval: float = 0.5, timeout: float = 60.0
+    ):
+        """
+        定期将打印队列中的消息刷新给回调函数，直到队列为空且状态为已完成
+        """
+        timeout_seconds = 0
+        logger.info(f"刷新打印队列中的消息 任务开始，interval: {interval}, timeout: {timeout}")
+        while True:
+            while True:
+                try:
+                    callback(self.print_msg.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            await asyncio.sleep(interval)  # 添加适当的延迟
+            timeout_seconds += interval
+            if self.print_msg.empty() and self.status == "completed":
+                logger.info("打印队列已清空，flush_print_queue 任务完成")
+                break
+            if timeout_seconds > timeout:
+                logger.error(f"flush_print_queue 任务超时，已等待 {timeout_seconds} 秒")
+                break
 
     def _create_error(self, message: str, tb: str = "") -> Dict[str, Any]:
         """创建错误响应"""
         if tb:
             self.print_msg.put_nowait(f"\n{tb}")
         caller_name = inspect.stack()[1].function
+        logger.error(f"[func: {caller_name}] {message}")
         return {
             "sub_result": "error",
             "message": f"[func: {caller_name}] {message}",

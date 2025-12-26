@@ -1,14 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
 
 from models.database import get_db
 from models.models import Project
 from schemas.project import ProjectCreate, ProjectUpdate, Project, ProjectList
 from services.project_service import ProjectService, ScriptService
 
-router = APIRouter(
-    prefix="/projects", tags=["projects"], responses={404: {"description": "Not found"}}
+router = APIRouter(tags=["projects"], responses={404: {"description": "Not found"}}
 )
 
 
@@ -50,7 +48,7 @@ def update_existing_project(
     project_id: int, project: ProjectUpdate, db: Session = Depends(get_db)
 ):
     """Update an existing project"""
-    db_project = get_project(db, project_id=project_id)
+    db_project = ProjectService.get_project(db, project_id=project_id)
     if db_project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return ProjectService.update_project(

@@ -1,11 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends
 from models.database import get_db
-from schemas.task import Task, TaskList, TaskCreate, TaskUpdate, TaskResult
+from schemas.task import Task, TaskCreate, TaskList, TaskResult, TaskUpdate
+from sqlalchemy.orm import Session
 
-router = APIRouter(
-    prefix="/tasks", tags=["tasks"], responses={404: {"description": "Not found"}}
-)
+router = APIRouter(tags=["tasks"], responses={404: {"description": "Not found"}})
 
 
 @router.post("/", response_model=Task)
