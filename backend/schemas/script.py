@@ -66,9 +66,12 @@ class ScriptExecutionRequest(BaseModel):
     log_level: str = Field(
         "INFO", description="Log level for script execution (e.g., DEBUG, INFO)"
     )
-    timeout: Optional[int] = Field(
-        30, description="Execution timeout in seconds (default 30)"
+    log_history: bool = Field(
+        False, description="Whether to include previous log history"
     )
+    # timeout: Optional[int] = Field(
+    #     30, description="Execution timeout in seconds (default 30)"
+    # )
 
 
 class ScriptExecutionResponse(BaseModel):

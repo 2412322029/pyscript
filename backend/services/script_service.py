@@ -62,18 +62,29 @@ class ScriptService:
     @staticmethod
     def create_script_service(db: Session, log_level: str = "INFO") -> str:
         """创建新脚本服务"""
-        S = ScriptExecutionService(log_level=log_level)
+        S = ScriptExecutionService(log_level=log_level, log_target="buffer")
         return ScriptExecutionService.add_service(S)
 
     @staticmethod
-    def get_all_script_service_ids(db: Session) -> List[str]:
+    def get_all_script_service_ids(db: Session) -> dict:
         """获取所有脚本服务"""
-        return list(ScriptExecutionServiceDict.keys())
+        j = {}
+        for service_id, S in ScriptExecutionServiceDict.items():
+            j[service_id] = S.get_context_size()
+        return j
 
     @staticmethod
     def get_script_service(service_id: str) -> Optional[ScriptExecutionService]:
         """根据ID获取脚本服务"""
         return ScriptExecutionServiceDict.get(service_id)
+    
+    @staticmethod
+    def delete_script_service(service_id: str) -> bool:
+        """删除脚本服务"""
+        if service_id in ScriptExecutionServiceDict:
+            del ScriptExecutionServiceDict[service_id]
+            return True
+        return False
 
     @staticmethod
     async def execute_script_bg(
@@ -81,6 +92,7 @@ class ScriptService:
         script_id: int,
         service_id: str | None = None,
         log_level: str = "DEBUG",
+        log_history: bool = False,
     ) -> Optional[dict]:
         """后台任务：执行脚本"""
         db_script = ScriptService.get_script(db, script_id)
@@ -94,6 +106,7 @@ class ScriptService:
             S.execute_script(
                 script_content_type=db_script.content_type,
                 script_content=json_content,
+                log_history=log_history,
             )
         )
         return service_id
@@ -106,3 +119,19 @@ class ScriptService:
             return S.get_context()
         else:
             return None
+
+    @staticmethod
+    def get_script_log_buffer(service_id: str) -> Optional[str]:
+        """获取脚本执行日志缓冲区"""
+        S = ScriptService.get_script_service(service_id)
+        if S:
+            return S.get_log_buffer()
+        else:
+            return None
+
+    @staticmethod
+    def clear_script_log_buffer(service_id: str) -> None:
+        """清空脚本执行日志缓冲区"""
+        S = ScriptService.get_script_service(service_id)
+        if S:
+            S.clear_log_buffer()

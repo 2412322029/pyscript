@@ -1,13 +1,15 @@
 import asyncio
 import inspect
+import io
 import logging
 import pprint
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime
 from traceback import format_exc
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
 from uuid import uuid4
 
 import aiohttp
@@ -106,11 +108,20 @@ class ScriptExecutionService:
     """
 
     global_context: Dict[str, Any] = {}
-    __slots__ = ("_context", "print_msg", "_status_callbacks")
+    __slots__ = ("_context", "print_msg", "_status_callbacks", "log_stream")
 
     # 类级别的支持动作字典
-    def __init__(self, log_level: str = "INFO"):
-        """初始化脚本执行服务"""
+    def __init__(
+        self,
+        log_level: str = "INFO",
+        log_target: Literal["console", "buffer"] = "console",
+    ):
+        """初始化脚本执行服务
+
+        Args:
+            log_level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+            log_target: 日志输出目标 ("console" 输出到控制台，"buffer" 输出到内存缓冲区)
+        """
         self._context = ScriptContext(
             status="created",
             variables={},
@@ -120,6 +131,7 @@ class ScriptExecutionService:
             execution_history=[],
         )
         self.print_msg = asyncio.Queue(10)
+        self.log_stream = io.StringIO()
         self._status_callbacks: List[Callable[[str, Any, Any], None]] = []
         # 根据日志级别设置不同颜色
         level_colors = {
@@ -141,13 +153,35 @@ class ScriptExecutionService:
 
         # 配置日志，使用自定义带颜色的 Formatter
         # 直接配置模块级别的 logger
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            ColoredFormatter(
+
+        # 根据 log_target 选择输出目标
+        if log_target == "buffer":
+            stream = self.log_stream
+            # buffer 模式不需要颜色
+            formatter = logging.Formatter(
                 fmt="%(asctime)s - %(levelname)s -> %(message)s",
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
-        )
+        else:
+            stream = sys.stdout
+
+            # console 模式使用带颜色的 Formatter
+            class ColoredFormatter(logging.Formatter):
+                def format(self, record):
+                    # 获取原始格式
+                    original = super().format(record)
+                    # 根据级别添加颜色
+                    color = level_colors.get(record.levelname, "")
+                    return f"{color}{original}{reset_color}"
+
+            formatter = ColoredFormatter(
+                fmt="%(asctime)s - %(levelname)s -> %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(formatter)
+
         # 设置 logger 的级别和处理器
         logger.setLevel(logging.getLevelName(log_level))
         # 清除已有的处理器，避免重复添加
@@ -227,20 +261,33 @@ class ScriptExecutionService:
     @result_message.setter
     def result_message(self, value: str):
         self._context.result_message = value
-        
+
     @property
     def current_step(self) -> int:
         return self._context.current_step
-    
+
     @current_step.setter
     def current_step(self, value: int):
         self._context.current_step = value
-        
+
     # 触发器类型
     TRIGGER_TYPES: set[str] = {"time_based", "interval", "event_based"}
 
     def get_context(self) -> ScriptContext:
         return self._context.model_copy()
+
+    def get_log_buffer(self) -> str:
+        """获取 buffer 模式下的日志内容"""
+        return self.log_stream.getvalue()
+
+    def clear_log_buffer(self) -> None:
+        """清空 buffer 模式下的日志内容"""
+        self.log_stream.truncate(0)
+        self.log_stream.seek(0)
+
+    def get_context_size(self) -> int:
+        """获取上下文大小"""
+        return sys.getsizeof(self._context)
 
     async def execute_script(
         self,
@@ -269,7 +316,9 @@ class ScriptExecutionService:
             if result.sub_result != "success":
                 self.status = "error"
                 logger.error(f"Step {self.current_step} failed: {result.message}")
-                self.result_message += f"Step {self.current_step} failed: {result.message}\n"
+                self.result_message += (
+                    f"Step {self.current_step} failed: {result.message}\n"
+                )
 
                 return
         # 执行完成
@@ -324,7 +373,7 @@ class ScriptExecutionService:
             error_message = f"Error executing {action_type}: {str(e)}"
             return self._create_error(error_message, tb=format_exc())
 
-    def get_supported_actions_metadata(self) -> List[Dict[str, ActionRegisterModel]]:
+    def get_supported_actions_metadata() -> List[Dict[str, ActionRegisterModel]]:
         """获取支持的动作元数据
         Returns:
             包含所有支持动作元数据的列表，过滤 func 字段
@@ -555,7 +604,9 @@ class ScriptExecutionService:
                 return self._create_error("While loop requires a condition")
             iteration_count: int = 0
             while True:
-                self.status = f"executing step {self.current_step} (loop {iteration_count})"
+                self.status = (
+                    f"executing step {self.current_step} (loop {iteration_count})"
+                )
                 if iteration_count >= max_iterations:
                     return self._create_error("Loop exceeded maximum iterations")
                 processed_condition: str = self._process_variable_references(condition)
