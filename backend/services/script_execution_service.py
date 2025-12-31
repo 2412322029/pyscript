@@ -472,6 +472,7 @@ class ScriptExecutionService:
         command: Optional[Union[str, List[str]]] = step.get("command")
         shell: bool = step.get("shell", False)
         timeout: int = step.get("timeout", 60)
+        command = self._process_variable_references(command)
         if not command:
             return self._create_error("_execute_command: Command is required")
         try:
@@ -495,7 +496,7 @@ class ScriptExecutionService:
             self.variables["stdout"] = result.stdout
             self.variables["stderr"] = result.stderr
             logger.debug(f"[execute_command] Command: {command}")
-            return result(
+            return SubResultModel(
                 sub_result="success",
                 message=f"Command executed with exit code {result.returncode}",
             )
@@ -520,14 +521,14 @@ class ScriptExecutionService:
     def _execute_eval(self, expression: str, log_history: bool) -> Any:
         safe_env: Dict[str, Any] = {"__builtins__": self.variables}
         if self._is_dangerous_expression(expression):
-            raise ValueError("Expression contains potentially dangerous operations")
+            return self._create_error("Expression contains potentially dangerous operations")
         try:
             result = eval(expression, safe_env)
             logger.debug(f"[eval] Expression: {expression} -> {result}")
             return result
         except Exception as e:
             logger.error(f"_execute_eval failed: {str(e)}", exc_info=True)
-            raise ValueError(f"Invalid _execute_eval: {str(e)}", tb=format_exc())
+            return self._create_error(f"Invalid _execute_eval: {str(e)}", tb=format_exc())
 
     @action_register(
         ActionRegisterModel(
@@ -947,12 +948,12 @@ class ScriptExecutionService:
         # 检查表达式中是否有危险操作
         expression = self._process_variable_references(expression)
         if self._is_dangerous_expression(expression):
-            raise ValueError("Expression contains potentially dangerous operations")
+            return self._create_error("Expression contains potentially dangerous operations")
         # 执行安全评估
         try:
             return bool(eval(expression, safe_env))
         except Exception as e:
-            raise ValueError(f"Invalid expression _safe_eval: {str(e)}")
+            return self._create_error(f"Invalid expression _safe_eval: {str(e)}")
 
     def _is_dangerous_command(self, command: Union[str, List[str]]) -> bool:
         """检查命令是否危险"""

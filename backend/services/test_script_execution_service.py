@@ -50,6 +50,7 @@ test_script_2 = {
                 "data": {"key": "value"},
             },
             {"action": "set_var", "name": "response", "value": "${response}"},
+            {"action": "execute_command", "command": "cmd /c dir"},
         ]
     }
 async def run_all_tests():
@@ -59,7 +60,7 @@ async def run_all_tests():
 
     # 打印元数据
     print("支持的操作元数据:")
-    pprint(S.get_supported_actions_metadata())
+    pprint(ScriptExecutionService.get_supported_actions_metadata())
     print("-" * 20)
 
     # 测试脚本执行服务
