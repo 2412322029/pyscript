@@ -14,6 +14,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pyscript.db")
 # 创建数据库引擎
 engine = create_engine(
     DATABASE_URL,
+    pool_pre_ping=True,
     connect_args={"check_same_thread": False}
     if DATABASE_URL.startswith("sqlite")
     else {},
@@ -33,7 +34,6 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-# 初始化数据库
 def init_db() -> None:
     """
     创建所有数据库表

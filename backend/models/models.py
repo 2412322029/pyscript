@@ -2,7 +2,6 @@ import datetime
 
 from sqlalchemy import (
     JSON,
-    Boolean,
     Column,
     DateTime,
     Float,
@@ -37,6 +36,7 @@ class Script(Base):
     nid = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), index=True)
     content = Column(Text)
+    content_type = Column(String(50), default="json")
     project_id = Column(Integer, ForeignKey("projects.nid"))
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)

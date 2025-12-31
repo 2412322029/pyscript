@@ -1,16 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-
 from models.database import get_db
 from models.models import Project
-from schemas.project import ProjectCreate, ProjectUpdate, Project, ProjectList
-from services.project_service import ProjectService, ScriptService
+from schemas.project import ProjectCreate, ProjectInDBBase, ProjectList, ProjectUpdate
+from services.project_service import ProjectService
+from services.script_service import ScriptService
+from sqlalchemy.orm import Session
 
 router = APIRouter(tags=["projects"], responses={404: {"description": "Not found"}}
 )
 
 
-@router.post("/", response_model=Project, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=ProjectInDBBase, status_code=status.HTTP_201_CREATED)
 def create_new_project(project: ProjectCreate, db: Session = Depends(get_db)):
     """Create a new project"""
     return ProjectService.create_project(
@@ -34,7 +34,7 @@ def read_projects(skip: int = 0, limit: int = 10, db: Session = Depends(get_db))
     }
 
 
-@router.get("/{project_id}", response_model=Project)
+@router.get("/{project_id}", response_model=ProjectInDBBase)
 def read_project(project_id: int, db: Session = Depends(get_db)):
     """Retrieve a specific project by ID"""
     db_project = ProjectService.get_project(db, project_id=project_id)
@@ -43,7 +43,7 @@ def read_project(project_id: int, db: Session = Depends(get_db)):
     return db_project
 
 
-@router.put("/{project_id}", response_model=Project)
+@router.put("/{project_id}", response_model=ProjectInDBBase)
 def update_existing_project(
     project_id: int, project: ProjectUpdate, db: Session = Depends(get_db)
 ):

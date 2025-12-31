@@ -3,9 +3,7 @@ from pprint import pprint
 
 from script_execution_service import ScriptExecutionService
 
-
-async def run_all_tests():
-    test_script_2 = {
+test_script_2 = {
         "steps": [
             {"action": "set_var", "name": "api_key", "value": "123"},
             {"action": "set_var", "name": "b", "value": "123"},
@@ -54,6 +52,8 @@ async def run_all_tests():
             {"action": "set_var", "name": "response", "value": "${response}"},
         ]
     }
+async def run_all_tests():
+    
     # 初始化脚本执行服务
     S = ScriptExecutionService(log_level="DEBUG")
 
@@ -99,3 +99,6 @@ async def run_all_tests():
 
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
+    
+    # 将 test_script_2 字典转为字符串后，把双引号转义为 \"
+    # print(json.dumps(test_script_2, ensure_ascii=False).replace("\"", "\\\""))

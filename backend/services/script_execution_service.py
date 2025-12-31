@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from traceback import format_exc
 from typing import Any, Callable, Dict, List, Optional, Union
+from uuid import uuid4
 
 import aiohttp
 from pydantic import BaseModel, Field
@@ -49,6 +50,9 @@ class ScriptContext(BaseModel):
     )
     execution_history: List[Optional[ExecuteHistoryeModel]] = Field(
         [], description="Execution history of the script"
+    )
+    current_step: int = Field(
+        1, description="Current step index in the script execution"
     )
 
 
@@ -93,6 +97,9 @@ def action_register(
     return decorator
 
 
+ScriptExecutionServiceDict: dict[str, "ScriptExecutionService"] = {}
+
+
 class ScriptExecutionService:
     """脚本执行服务类，负责解析和执行JSON格式的脚本
     异步实现，适配FastAPI框架，支持各种脚本操作
@@ -133,6 +140,7 @@ class ScriptExecutionService:
                 return f"{color}{original}{reset_color}"
 
         # 配置日志，使用自定义带颜色的 Formatter
+        # 直接配置模块级别的 logger
         handler = logging.StreamHandler()
         handler.setFormatter(
             ColoredFormatter(
@@ -140,10 +148,21 @@ class ScriptExecutionService:
                 datefmt="%Y-%m-%d %H:%M:%S",
             )
         )
-        logging.basicConfig(
-            level=logging.getLevelName(log_level),
-            handlers=[handler],
-        )
+        # 设置 logger 的级别和处理器
+        logger.setLevel(logging.getLevelName(log_level))
+        # 清除已有的处理器，避免重复添加
+        if logger.handlers:
+            logger.handlers.clear()
+        logger.addHandler(handler)
+        # 防止日志传播到 root logger
+        logger.propagate = False
+
+    @staticmethod
+    def add_service(service: "ScriptExecutionService") -> str:
+        """添加脚本执行服务"""
+        name = uuid4().hex
+        ScriptExecutionServiceDict.update({name: service})
+        return name
 
     def add_status_observer(self, callback: Callable[[str, Any, Any], None]) -> None:
         self._status_callbacks.append(callback)
@@ -177,7 +196,6 @@ class ScriptExecutionService:
     def variables(self, value: Dict[str, Any]):
         self._context.variables = value
 
-
     @property
     def execution_history(self) -> List[Optional["ExecuteHistoryeModel"]]:
         return self._context.execution_history
@@ -209,7 +227,15 @@ class ScriptExecutionService:
     @result_message.setter
     def result_message(self, value: str):
         self._context.result_message = value
-
+        
+    @property
+    def current_step(self) -> int:
+        return self._context.current_step
+    
+    @current_step.setter
+    def current_step(self, value: int):
+        self._context.current_step = value
+        
     # 触发器类型
     TRIGGER_TYPES: set[str] = {"time_based", "interval", "event_based"}
 
@@ -218,13 +244,13 @@ class ScriptExecutionService:
 
     async def execute_script(
         self,
-        script_content: Dict[str, Any],
+        script_content: Dict[str, Any] | str,
         variables: Dict[str, Any] = None,
         log_history: bool = False,
         script_content_type: str = "json",
     ) -> Dict[str, Any]:
         """执行脚本"""
-        logger.debug(f"{'=' * 20}Executing script <{id(inspect.stack())}>{'=' * 20}")
+        logger.debug(f"{'Executing script <' + str(id(inspect.stack())) + '>':=^80}")
         start_time = time.perf_counter()
         # 验证脚本格式
         if isinstance(script_content, str):
@@ -236,12 +262,14 @@ class ScriptExecutionService:
         # 执行步骤
         for i, step in enumerate(steps):
             # logger.debug("Step details: %s", pprint.pformat(step))
-            self.status = f"executing step {i + 1}"
+            self.current_step = i + 1
+            # self.status = f"executing step {self.current_step} (start)"
             result = await self._execute_step(step, log_history)
+            # self.status = f"executing step {self.current_step} (end)"
             if result.sub_result != "success":
                 self.status = "error"
-                logger.error(f"Step {i + 1} failed: {result.message}")
-                self.result_message += f"Step {i + 1} failed: {result.message}\n"
+                logger.error(f"Step {self.current_step} failed: {result.message}")
+                self.result_message += f"Step {self.current_step} failed: {result.message}\n"
 
                 return
         # 执行完成
@@ -250,7 +278,9 @@ class ScriptExecutionService:
         self.result_message += (
             f"json Script executed successfully with {len(steps)} steps\n"
         )
-        logger.debug(f"{'=' * 20}execution completed{'=' * 20}")
+        logger.debug(
+            f"{'Execution completed in ' + self.execution_time + ' seconds':=^80}"
+        )
 
     async def _execute_step(
         self,
@@ -279,6 +309,7 @@ class ScriptExecutionService:
                 result = await action_func(self, step=step, log_history=log_history)
             else:
                 result = action_func(self, step=step, log_history=log_history)
+            self.status = f"executing step {self.current_step} ({action_type})"
             # 记录执行历史
             if log_history:
                 self.execution_history.append(
@@ -475,6 +506,7 @@ class ScriptExecutionService:
             processed_condition: str = self._process_variable_references(condition)
             # 安全评估条件表达式
             result: bool = self._safe_eval(processed_condition)
+            # self.status = f"executing step {self.current_step} (condition: {result})"
             # 根据条件结果执行相应步骤
             steps_to_execute: List[Dict[str, Any]] = if_true if result else if_false
             for sub_step in steps_to_execute:
@@ -523,6 +555,7 @@ class ScriptExecutionService:
                 return self._create_error("While loop requires a condition")
             iteration_count: int = 0
             while True:
+                self.status = f"executing step {self.current_step} (loop {iteration_count})"
                 if iteration_count >= max_iterations:
                     return self._create_error("Loop exceeded maximum iterations")
                 processed_condition: str = self._process_variable_references(condition)

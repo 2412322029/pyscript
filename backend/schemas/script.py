@@ -1,37 +1,11 @@
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, validator
 
 
-class ScriptBase(BaseModel):
-    name: str = Field(
-        ..., min_length=1, max_length=100, description="Name of the script"
-    )
-    content: str = Field(
-        ..., min_length=10, description="Python code content of the script"
-    )
-    description: Optional[str] = Field(
-        None, max_length=500, description="Optional description of the script's purpose"
-    )
-    project_id: Optional[int] = Field(
-        None, ge=1, description="Optional project ID this script belongs to"
-    )
-    is_active: Optional[bool] = Field(
-        True, description="Whether the script is active and can be executed"
-    )
-
-    @validator("content")
-    def validate_python_syntax(cls, v):
-        """Basic Python syntax validation"""
-        try:
-            compile(v, "<string>", "exec")
-        except SyntaxError as e:
-            raise ValueError(f"Invalid Python syntax: {str(e)}")
-        return v
-
-
-class ScriptCreate(ScriptBase):
+class ScriptCreate(BaseModel):
     """Schema for creating a new script"""
 
     name: str = Field(
@@ -40,50 +14,44 @@ class ScriptCreate(ScriptBase):
         max_length=100,
         description="Name must be at least 3 characters",
     )
+    content: str = Field(
+        ..., min_length=10, description="Python code content of the script"
+    )
+    content_type: str = Field(
+        "json", description="Type of script content (e.g., json, bash)"
+    )
+    project_id: Optional[int] = Field(
+        None, ge=1, description="Optional project ID this script belongs to"
+    )
+    @validator("content")
+    def validate_json_syntax(cls, v):
+        """Basic JSON syntax validation"""
+        try:
+            json.loads(v)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON syntax: {str(e)}")
+        return v
 
 
-class ScriptUpdate(BaseModel):
-    """Schema for updating an existing script"""
+class ScriptUpdate(ScriptCreate):
+    ...
 
-    name: Optional[str] = Field(None, min_length=3, max_length=100)
-    content: Optional[str] = Field(None, min_length=10)
-    description: Optional[str] = Field(None, max_length=500)
-    project_id: Optional[int] = Field(None, ge=1)
-    is_active: Optional[bool] = None
-
-
-class ScriptInDBBase(ScriptBase):
-    id: int = Field(..., description="Unique identifier for the script")
+class ScriptInDBBase(BaseModel):
+    nid: int = Field(..., description="Unique identifier for the script")
     created_at: datetime = Field(
         ..., description="Timestamp when the script was created"
     )
     updated_at: datetime = Field(
         ..., description="Timestamp when the script was last updated"
     )
-    created_by: Optional[str] = Field(None, description="User who created the script")
-
     class Config:
         from_attributes = True
-
-
-class Script(ScriptInDBBase):
-    """Schema for returning complete script details"""
-
-    execution_count: int = Field(
-        0, description="Number of times this script has been executed"
-    )
-    last_executed_at: Optional[datetime] = Field(
-        None, description="Timestamp when the script was last executed"
-    )
-    last_status: Optional[str] = Field(
-        None, description="Status of the last execution (success/failed)"
-    )
 
 
 class ScriptList(BaseModel):
     """Schema for listing scripts with pagination"""
 
-    scripts: List[Script]
+    scripts: List[ScriptInDBBase]
     pagination: dict = Field(
         default_factory=lambda: {"total": 0, "skip": 0, "limit": 10, "has_next": False},
         description="Pagination information",
@@ -94,8 +62,9 @@ class ScriptExecutionRequest(BaseModel):
     """Schema for requesting script execution"""
 
     script_id: int = Field(..., ge=1, description="ID of the script to execute")
-    params: Optional[Dict[str, Any]] = Field(
-        None, description="Optional parameters to pass to the script"
+    service_id: str = Field(..., description="ID of the script execution service")
+    log_level: str = Field(
+        "INFO", description="Log level for script execution (e.g., DEBUG, INFO)"
     )
     timeout: Optional[int] = Field(
         30, description="Execution timeout in seconds (default 30)"
